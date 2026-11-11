@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+/*
+ * Contract test: PWA file handling entry points in app.js.
+ *
+ * Parses the real app.js source and asserts the file-handling contract:
+ *   - launchQueue consumer registered at boot (buffered queue cannot miss)
+ *   - share-target files consumed from the fixed SHARED_CACHE
+ *   - file intake accepts picker / drag-drop / paste
+ *   - worker protocol: init/convert/formats/metadata + boot-progress
+ *
+ * Usage: node tests/app-file-handling.test.mjs
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+let pass = 0, fail = 0;
+const failures = [];
+function check(name, cond, extra) {
+  if (cond) { pass++; console.log('PASS  ' + name); }
+  else { fail++; failures.push(name); console.log('FAIL  ' + name + (extra ? ' -- ' + extra : '')); }
+}
+
+const app = fs.readFileSync(path.join(REPO, 'app.js'), 'utf8');
+const worker = fs.readFileSync(path.join(REPO, 'worker.js'), 'utf8');
+
+// ---- launchQueue: OS "Open with" handling ----
+check('app.js registers a launchQueue consumer',
+  /launchQueue\.setConsumer\s*\(/.test(app));
+check('launchQueue consumer handles params.files (array-like)',
+  /params\.files/.test(app));
+check('setupLaunchQueue is called during boot',
+  // the init block at the file tail calls it (the function definition also
+  // matches the bare regex, so strip definitions of every setup* helper and
+  // look for bare calls)
+  (() => {
+    const withoutDefs = app.replace(/^  function setup\w+\s*\([^)]*\)\s*\{[\s\S]*?\n  \}/gm, '');
+    return /^\s*setupLaunchQueue\(\);/m.test(withoutDefs);
+  })());
+
+// ---- share target consumption ----
+check('app.js consumes shared files from the fixed cache name',
+  /caches\.open\(\s*SHARED_CACHE\s*\)/.test(app));
+check('SHARED_CACHE matches sw.js (calibre-web-shared)',
+  /SHARED_CACHE\s*=\s*'calibre-web-shared'/.test(app) &&
+  /SHARED_CACHE\s*=\s*'calibre-web-shared'/.test(fs.readFileSync(path.join(REPO, 'sw.js'), 'utf8')));
+check('shared files are deleted after reading (no double-ingest on reload)',
+  /cache\.delete\(key\)/.test(app));
+
+// ---- intake surfaces ----
+check('picker intake: #file-input change handler', /fileInput\.addEventListener\('change'/.test(app));
+check('drag-drop intake: drop handler reads dataTransfer.files',
+  /ev\.dataTransfer\.files/.test(app));
+check('paste intake: clipboardData.files', /clipboardData\.files/.test(app));
+
+// ---- worker protocol ----
+// The protocol resolves replies by message id; the app must accept every
+// result type the worker can post.
+check('worker protocol: init message',
+  /send\('init'/.test(app) && /msg\.type === 'init'/.test(worker));
+check('worker protocol: formats message + formats-result reply',
+  /send\('formats'/.test(app) && /'formats-result'/.test(worker));
+check('worker protocol: convert message + convert-result reply',
+  /send\('convert'/.test(app) && /'convert-result'/.test(worker));
+check('worker protocol: metadata message + metadata-result reply',
+  /send\('metadata'/.test(app) && /'metadata-result'/.test(worker));
+check('worker protocol: boot-progress handled by the app',
+  /boot-progress/.test(worker) && /boot-progress/.test(app));
+
+// ---- service worker registration ----
+check('app.js registers sw.js', /navigator\.serviceWorker\.register\('\.\/sw\.js'\)/.test(app));
+
+// ---- formats list wiring ----
+check('format dropdown built from engine-reported formats (renderFormatOptions)',
+  /renderFormatOptions/.test(app) && /formatSelect\.appendChild/.test(app));
+
+console.log(`\n${pass} passed, ${fail} failed`);
+if (fail) { failures.forEach(f => console.log('FAILED: ' + f)); process.exit(1); }

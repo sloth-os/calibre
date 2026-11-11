@@ -1,0 +1,84 @@
+{
+  "name": "calibre WASM — ebook converter",
+  "short_name": "calibre",
+  "description": "Convert ebooks entirely in your browser: calibre's conversion engine compiled to WebAssembly, offline-capable.",
+  "start_url": "./",
+  "scope": "./",
+  "id": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#21252b",
+  "theme_color": "#21252b",
+  "categories": ["productivity", "utilities", "books"],
+  "launch_handler": {
+    "client_mode": ["focus-existing", "auto"]
+  },
+  "icons": [
+    {
+      "src": "./icons/icon-16.png",
+ "sizes": "16x16",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/icon-32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "application/epub+zip": [".epub", ".kepub"],
+        "application/x-mobipocket-ebook": [".mobi", ".prc", ".azw"],
+ "application/vnd.amazon.ebook": [".azw3", ".azw4"],
+ "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+ "application/msword": [".doc"],
+        "text/html": [".html", ".htm", ".xhtml"],
+        "text/plain": [".txt", ".text", ".md", ".markdown", ".textile"],
+        "application/x-fictionbook+xml": [".fb2", ".zip", ".fbz"],
+        "application/zip": [".htmlz", ".txtz"],
+        "application/vnd.oasis.opendocument.text": [".odt"],
+        "application/rtf": [".rtf"],
+        "application/x-palm-database": [".pml", ".pmlz", ".pdb"],
+        "application/x-texterous-tcr": [".tcr"],
+        "application/x-nintendo-snes-book": [".snb"],
+        "application/x-rocketbook": [".rb"],
+        "application/oebps-package+xml": [".opf"],
+        "application/x-ms-reader": [".lit"],
+        "application/vnd.ms-htmlhelp": [".chm"],
+ "application/pdf": [".pdf"],
+        "image/vnd.djvu": [".djvu", ".djv"]
+      },
+      "launch_type": "multiple-clients"
+    }
+  ],
+  "share_target": {
+    "action": "./__share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["*/*"]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Built artifacts (CI publishes fresh ones weekly; not committed)
+wasm/
+site-publish/
+wasm-stage/
+.bundle-work/
+
+# Local dev scratch
+dev/vendor/
+dev/stage/
+node_modules/
+*.log
+.DS_Store
+__pycache__/

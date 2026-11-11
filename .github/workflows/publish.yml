@@ -1,0 +1,183 @@
+name: Build & Publish calibre WASM
+
+# Publish calibre's conversion engine (compiled to WebAssembly via Pyodide)
+# to GitHub Pages as an offline-capable PWA with OS file handling.
+#
+# Every run builds the engine from the LATEST upstream calibre master
+# (kovidgoyal/calibre): the wasm bundle is not committed, it is assembled
+# fresh — patched src + pure-Python shims + vendor wheels + generated
+# resources — then smoke-tested under Node with a real ebook conversion
+# before anything is published.
+#
+# Triggers:
+#   schedule  weekly, Monday 04:00 UTC (off-peak; fixed time keeps runs easy to find)
+#   push      redeploy the site (UI/shim/workflow changes)
+#   dispatch  manual runs; `ref` builds a specific calibre tag/commit,
+#             `skip_build` redeploys the site only, reusing the latest artifact
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'calibre git ref (tag, branch or commit) to build'
+        required: false
+        default: ''
+      skip_build:
+        description: 'Skip building (redeploy site with the bundle from the latest successful run)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: read   # skip_build: download the bundle artifact from a previous run
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  PYODIDE_VERSION: 314.0.7
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout site repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Resolve calibre ref
+        id: ref
+        if: ${{ !inputs.skip_build }}
+        run: |
+          if [ -n "${{ inputs.ref }}" ]; then
+            echo "ref=${{ inputs.ref }}" >> "$GITHUB_OUTPUT"
+          else
+            REF=$(git ls-remote --heads https://github.com/kovidgoyal/calibre.git master | awk '{print $1}')
+            if [ -z "$REF" ]; then
+              echo "::error::failed to resolve calibre master"
+              exit 1
+            fi
+            echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Building calibre ref: ${REF:-${{ inputs.ref }}}"
+
+      - name: Checkout calibre source
+        if: ${{ !inputs.skip_build }}
+        uses: actions/checkout@v5
+        with:
+          repository: kovidgoyal/calibre
+          ref: ${{ steps.ref.outputs.ref }}
+          path: calibre
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python (bundle build tooling)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build the wasm bundle
+        if: ${{ !inputs.skip_build }}
+        run: |
+          ./patches/build-bundle.sh "$GITHUB_WORKSPACE/calibre" "$GITHUB_WORKSPACE/wasm-stage" "$GITHUB_WORKSPACE/.bundle-work"
+
+      - name: Smoke-test the bundle under Node (boot + real conversion)
+        if: ${{ !inputs.skip_build }}
+        run: |
+          node tests/worker-integration.test.mjs "$GITHUB_WORKSPACE/wasm-stage"
+
+      - name: Upload bundle artifact
+        if: ${{ !inputs.skip_build }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibre-wasm-bundle
+          path: wasm-stage/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Reuse bundle from latest successful build
+        if: ${{ inputs.skip_build }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Pick the latest successful run that actually CARRIES a bundle
+          # artifact: skip_build runs reuse instead of upload, so the most
+          # recent success may itself have been a redeploy.
+          RUN_ID=""
+          for CAND in $(gh run list --workflow=publish.yml --status=success \
+                          --limit 10 --json databaseId --jq '.[].databaseId'); do
+            COUNT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAND/artifacts?name=calibre-wasm-bundle" \
+                      --jq '.total_count')
+            if [ "$COUNT" != "0" ]; then RUN_ID="$CAND"; break; fi
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::skip_build requested but no previous run with a bundle artifact exists."
+            exit 1
+          fi
+          echo "Reusing bundle artifact from run $RUN_ID"
+          rm -rf wasm-stage
+          gh run download "$RUN_ID" --name calibre-wasm-bundle --dir wasm-stage
+
+      - name: Stage site assets
+        run: |
+          set -euo pipefail
+          # Site files at repo root; the wasm build lands in wasm/.
+          rsync -a \
+            --exclude='.github' --exclude='.git' --exclude='.gitignore' \
+            --exclude='README.md' --exclude='DESIGN.md' \
+            --exclude='tests' --exclude='patches' --exclude='shims' \
+            --exclude='dev' --exclude='wasm' --exclude='wasm-stage' \
+            --exclude='.bundle-work' --exclude='node_modules' \
+            ./ site-publish/
+          mkdir -p site-publish/wasm
+          cp wasm-stage/pyodide/* site-publish/wasm/
+          cp wasm-stage/calibre-bundle.zip site-publish/wasm/
+          cp wasm-stage/bundle-info.json site-publish/build-info.json
+          echo '--- site-publish ---'
+          find site-publish -type f | sort
+          # Guard: the site is a handful of files + ~36 MB of engine. If a
+          # working directory ever leaks past the excludes, fail here instead
+          # of uploading gigabytes to Pages.
+          FILES=$(find site-publish -type f | wc -l)
+          SIZE_MB=$(du -sm site-publish | cut -f1)
+          if [ "$FILES" -gt 60 ] || [ "$SIZE_MB" -gt 120 ]; then
+            echo "::error::site-publish looks wrong: $FILES files, ${SIZE_MB} MB (expected <=60 files, <=120 MB)"
+            exit 1
+          fi
+
+      - name: Generate service worker asset list
+        run: |
+          node .github/scripts/generate-sw-manifest.mjs site-publish
+          head -c 400 site-publish/sw-manifest.js; echo
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site-publish
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: https://sloth-os.github.io/calibre/
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
