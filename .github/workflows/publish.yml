@@ -185,6 +185,22 @@ jobs:
           # one tests bundle + layout TOGETHER.
           node tests/worker-integration.test.mjs "$GITHUB_WORKSPACE/site-publish"
 
+      - name: Install Playwright Chromium (browser-level smoke)
+        run: |
+          # Pinned; --no-save keeps the repo dependency-free (node_modules is
+          # excluded from the staged site by the rsync step).
+          npm install --no-save playwright@1.65.0
+          npx playwright install --with-deps chromium
+
+      - name: Browser smoke test (real Chromium boots the staged site)
+        run: |
+          # The Node harnesses cannot see browser-only runtime guards (e.g.
+          # pyodide rejecting classic workers) or MIME-sensitive paths (wasm
+          # streaming, ESM imports) — real headless Chromium can. Boots the
+          # staged site end to end: app.js module worker -> pyodide -> engine
+          # ready -> real TXT->EPUB conversion.
+          node tests/browser-smoke.test.mjs "$GITHUB_WORKSPACE/site-publish"
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

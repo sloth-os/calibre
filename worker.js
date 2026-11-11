@@ -1,7 +1,7 @@
 /*
  * worker.js — Pyodide host worker for the calibre WASM conversion engine.
  *
- * MESSAGE PROTOCOL (classic worker, no modules):
+ * MESSAGE PROTOCOL (module worker — pyodide rejects classic workers):
  *   main -> worker: {id, type:'init'}
  *                   | {id, type:'convert', name, input: ArrayBuffer,
  *                      outputFormat, options?: {...}}
@@ -16,7 +16,7 @@
  *                   | {id, type:'progress', line} (calibre log lines)
  *
  * BOOT SEQUENCE (the slow part, reported via boot-progress):
- *   1. importScripts pyodide.js; loadPyodide (indexURL ./wasm/)
+ *   1. dynamic import() of pyodide.mjs; loadPyodide (indexURL ./wasm/pyodide/)
  *   2. fetch calibre-bundle.zip (~25 MB, served from the SW cache when
  *      offline), stage it into MEMFS via Python's zipfile
  *   3. set sys.paths/resources/extensions locations, import the plumber
@@ -26,11 +26,15 @@
  * /tmp-scoped dirs); a queue in the dispatch loop serializes them.
  *
  * Node-testable by contract: uses ONLY self.onmessage, self.postMessage,
- * importScripts, fetch, and JS built-ins.
+ * dynamic import(), fetch, and JS built-ins.
  */
 'use strict';
 
-var PYODIDE_URL = './wasm/pyodide/pyodide.js';
+// ESM entry on purpose: pyodide (>= 0.28 / 3xx releases) throws "Classic web
+// workers are not supported" when it detects importScripts in a browser
+// worker, so this file runs as a MODULE worker (app.js spawns it with
+// { type: 'module' }) and loads pyodide via dynamic import().
+var PYODIDE_MJS_URL = './wasm/pyodide/pyodide.mjs';
 var BUNDLE_URL = './wasm/calibre-bundle.zip';
 
 var pyodide = null;      // pyodide API object once loaded
@@ -48,14 +52,19 @@ function post(msg) {
 var BOOT_PYTHON = null; // set lazily below (large string)
 
 function loadPyodideApi() {
-  importScripts(PYODIDE_URL);
-  if (typeof loadPyodide !== 'function') {
-    return Promise.reject(new Error('loadPyodide is not defined after importScripts(' + PYODIDE_URL + ')'));
-  }
-  return loadPyodide({
-    indexURL: new URL('./wasm/pyodide/', self.location.href).href,
-    stdout: function (line) { post({ type: 'progress', line: line }); },
-    stderr: function (line) { post({ type: 'progress', line: line }); },
+  // Absolute specifier (https: in the browser, file: in the Node harness).
+  return import(new URL(PYODIDE_MJS_URL, self.location.href).href).then(function (mod) {
+    if (!mod || typeof mod.loadPyodide !== 'function') {
+      throw new Error('loadPyodide is not exported by ' + PYODIDE_MJS_URL);
+    }
+    // Exposed on globalThis exactly like the old UMD importScripts did, so
+    // the Node test harness can intercept the assignment (indexURL fixup).
+    globalThis.loadPyodide = mod.loadPyodide;
+    return globalThis.loadPyodide({
+      indexURL: new URL('./wasm/pyodide/', self.location.href).href,
+      stdout: function (line) { post({ type: 'progress', line: line }); },
+      stderr: function (line) { post({ type: 'progress', line: line }); },
+    });
   });
 }
 

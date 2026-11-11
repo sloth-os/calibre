@@ -152,7 +152,8 @@ t('uchardet: detect + empty', t_uchardet)
 print(json.dumps(results))
 `;
 
-const tmp = path.join(os.tmpdir(), 'calibre-web-tests', 'shims-test.py');
+// pid-suffixed: concurrent runs must not overwrite each other's scratch file.
+const tmp = path.join(os.tmpdir(), 'calibre-web-tests', `shims-test-${process.pid}.py`);
 fs.mkdirSync(path.dirname(tmp), { recursive: true });
 fs.writeFileSync(tmp, PY);
 // The cPalmdoc import test above references calibre.ebooks.compression.palmdoc

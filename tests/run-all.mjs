@@ -20,8 +20,9 @@ import { fileURLToPath } from 'node:url';
 const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(TESTS_DIR, '..');
 
-// Fast static checks first, the wasm-driven integration last (it boots the
-// whole engine and takes ~1 minute).
+// Fast static checks first, then the wasm-driven Node integration (boots the
+// whole engine, ~1 minute), then the real-browser smoke (skipped unless
+// playwright + a built engine are present).
 const ORDERED = [
   'index-html.test.mjs',
   'app-file-handling.test.mjs',
@@ -29,10 +30,11 @@ const ORDERED = [
   'sw.test.mjs',
   'shims.test.mjs',
   'worker-integration.test.mjs',
+  'browser-smoke.test.mjs',
 ];
 
 // Helpers, not suites.
-const NOT_SUITES = new Set(['run-all.mjs', 'make-mini10.mjs']);
+const NOT_SUITES = new Set(['run-all.mjs', 'make-mini10.mjs', 'serve.mjs']);
 
 // Per-suite wall-clock budget; the worker integration boots the whole wasm
 // engine, so it gets a generous default. Override with TEST_TIMEOUT_MS.

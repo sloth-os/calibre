@@ -58,12 +58,12 @@ function literal(source, regex, what) {
 }
 
 // ---------------------------------------------------------------- worker.js --
-// The engine's boot geometry: importScripts(PYODIDE_URL), fetch(BUNDLE_URL),
-// loadPyodide({indexURL}) — pyodide loads its asm/stdlib files relative to
-// indexURL, so the whole directory must be intact.
+// The engine's boot geometry: dynamic import(PYODIDE_MJS_URL),
+// fetch(BUNDLE_URL), loadPyodide({indexURL}) — pyodide loads its asm/stdlib/
+// lock files relative to indexURL, so the whole directory must be intact.
 console.log('worker.js geometry');
 const worker = read('worker.js');
-const pyodideUrl = toRel(literal(worker, /var PYODIDE_URL = '([^']+)';/, 'PYODIDE_URL'));
+const pyodideUrl = toRel(literal(worker, /var PYODIDE_MJS_URL = '([^']+)';/, 'PYODIDE_MJS_URL'));
 const bundleUrl = toRel(literal(worker, /var BUNDLE_URL = '([^']+)';/, 'BUNDLE_URL'));
 const indexUrl = toRel(literal(worker, /indexURL: new URL\('([^']+)', self\.location\.href\)/, 'indexURL'));
 
@@ -71,13 +71,20 @@ check(`${pyodideUrl} exists`, exists(pyodideUrl));
 check(`${bundleUrl} exists`, exists(bundleUrl));
 check(`indexURL dir ${indexUrl} exists`, fs.existsSync(path.join(SITE, indexUrl)) &&
   fs.statSync(path.join(SITE, indexUrl)).isDirectory());
-check('indexURL dir matches PYODIDE_URL location',
+check('indexURL dir matches PYODIDE_MJS_URL location',
   path.posix.dirname(pyodideUrl) + '/' === indexUrl,
   `${path.posix.dirname(pyodideUrl)}/ vs ${indexUrl}`);
-// What pyodide itself fetches from indexURL at load time.
-for (const core of ['pyodide.js', 'python_stdlib.zip', 'pyodide.asm.wasm']) {
+// What pyodide itself imports/fetches from indexURL at load time (pyodide.mjs
+// is the entry, pyodide.asm.mjs the wasm loader module, the rest are fetched).
+for (const core of ['pyodide.mjs', 'pyodide.asm.mjs', 'pyodide.asm.wasm',
+  'python_stdlib.zip', 'pyodide-lock.json']) {
   check(`${indexUrl}${core} exists`, exists(indexUrl + core));
 }
+// Pyodide throws "Classic web workers are not supported" in any browser
+// worker where importScripts works — guard the deployed bytes directly (the
+// Node harness cannot trip this browser-only check).
+check('worker.js never calls importScripts (module worker only)',
+  !/\bimportScripts\s*\(/.test(worker));
 
 // ------------------------------------------------------------- app shell --
 console.log('app shell geometry');
@@ -87,7 +94,9 @@ for (const src of indexHtml.matchAll(/<script[^>]+src="([^"]+)"/g)) {
   check(`index.html script ${src[1]} exists`, exists(toRel(src[1])));
 }
 const app = read('app.js');
-const workerPath = toRel(literal(app, /new Worker\('([^']+)'\)/, 'new Worker(...)'));
+const workerPath = toRel(literal(app, /new Worker\('([^']+)'(?:,\s*\{[^}]*\})?\)/, 'new Worker(...)'));
+check("app.js spawns the worker with { type: 'module' } (pyodide rejects classic workers)",
+  /new Worker\('[^']+',\s*\{\s*type:\s*'module'\s*\}\)/.test(app));
 check(`app.js worker ${workerPath} exists`, exists(workerPath));
 const swPath = toRel(literal(app, /serviceWorker\.register\('([^']+)'\)/, 'serviceWorker.register(...)'));
 check(`app.js registers ${swPath} and it exists`, exists(swPath));

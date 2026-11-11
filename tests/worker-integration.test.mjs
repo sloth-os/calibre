@@ -2,8 +2,9 @@
 /*
  * Worker integration test: drive the REAL worker.js against the REAL wasm
  * bundle the way a browser would — via the same message protocol the app
- * uses. Node stands in for the browser: worker.js's importScripts/fetch
- * contract is satisfied by shims below (see worker.js's "Node-testable by
+ * uses. Node stands in for the browser: worker.js runs as an ESM module
+ * worker (the same kind app.js spawns in a browser) with its import()/fetch
+ * contract satisfied by shims below (see worker.js's "Node-testable by
  * contract" note).
  *
  * Usage: node tests/worker-integration.test.mjs [bundle-dir]
@@ -47,12 +48,23 @@ if (!SITE_LAYOUT && !fs.existsSync(path.join(BUNDLE_DIR, 'calibre-bundle.zip')))
 }
 
 // ---------------------------------------------------------------- worker shim
-// worker.js is a classic worker script: it uses self.postMessage /
-// self.onmessage / importScripts / fetch. Node's worker_threads has none of
-// those, so the worker file is prefixed with a preamble that polyfills them
-// (importScripts loads the local pyodide distribution via require, fetch
-// reads from disk) — worker.js itself runs unmodified.
+// worker.js is a MODULE worker script: it uses self.postMessage /
+// self.onmessage / dynamic import() / fetch. Node's worker_threads has none
+// of the browser globals, so the worker file is prefixed with a preamble
+// that polyfills them (fetch reads from disk; import() of pyodide.mjs works
+// natively via file:// URLs) — worker.js itself runs unmodified.
 const workerSrc = fs.readFileSync(path.join(REPO, 'worker.js'), 'utf8');
+const appSrc = fs.readFileSync(path.join(REPO, 'app.js'), 'utf8');
+
+// Pyodide's "Classic web workers are not supported" guard only fires in
+// BROWSERS (its env detection sees Node first), so the harness cannot trip
+// that wire itself — assert the contract statically instead.
+check('worker.js never calls importScripts (pyodide rejects classic workers)',
+  !/\bimportScripts\s*\(/.test(workerSrc));
+check("worker.js imports the ESM pyodide entry",
+  /PYODIDE_MJS_URL = '\.\/wasm\/pyodide\/pyodide\.mjs'/.test(workerSrc));
+check("app.js spawns worker.js with { type: 'module' }",
+  /new Worker\('\.\/worker\.js',\s*\{\s*type:\s*'module'\s*\}\)/.test(appSrc));
 
 console.log(`booting worker with ${SITE_LAYOUT ? 'staged site' : 'bundle'} layout at`, BUNDLE_DIR);
 
@@ -65,14 +77,15 @@ try {
 } catch (e) {
   if (e.code !== 'EEXIST') throw e;
 }
-// The preamble runs INSIDE the worker before worker.js: defines importScripts
-// (loads the local pyodide distribution as a module) and fetch (reads from
-// the bundle dir) so worker.js's browser contract holds.
+// The preamble runs INSIDE the module worker before worker.js: defines the
+// browser globals worker.js expects (self/location/postMessage/onmessage/
+// fetch) plus a loadPyodide assignment interceptor — importScripts is
+// deliberately NOT shimmed: module workers do not have it, and pyodide
+// rejects any browser environment where it does work.
 const PREAMBLE = `
-const { createRequire } = require('node:module');
-const fs = require('node:fs');
-const path = require('node:path');
-const { parentPort } = require('node:worker_threads');
+import fs from 'node:fs';
+import path from 'node:path';
+import { parentPort } from 'node:worker_threads';
 const BUNDLE_DIR = ${JSON.stringify(BUNDLE_DIR)};
 
 // Browser worker contract on top of worker_threads:
@@ -88,31 +101,24 @@ Object.defineProperty(globalThis, 'onmessage', {
   get() { return undefined; },
 });
 
-globalThis.importScripts = (...urls) => {
-  for (const u of urls) {
-    // Resolve './wasm/...' against the bundle dir itself: a staged site has a
-    // real wasm/ tree, a raw bundle dir has the wasm -> . symlink. Either way
-    // the worker's URL maps to bytes on disk without stripping the prefix.
-    const p = u.startsWith('./wasm/') ? path.join(BUNDLE_DIR, u.slice(2)) : u;
-    // pyodide.js is a UMD bundle: require it and expose its exports.
-    const mod = require(path.resolve(p));
-    Object.assign(globalThis, mod);
-  }
-  // pyodide under Node resolves indexURL with path.resolve (ignoring
-  // file:// URLs); rewrite the file:// indexURL worker.js derives into a
-  // plain path so the stdlib/asm files resolve on this host.
-  if (globalThis.loadPyodide && !globalThis.loadPyodide.__pathFix) {
-    const orig = globalThis.loadPyodide;
-    const fixed = (opts) => {
+// worker.js dynamic-import()s pyodide.mjs through an absolute file:// URL
+// derived from location.href (native ESM import — no shim needed), then
+// assigns globalThis.loadPyodide. Intercept the ASSIGNMENT: pyodide under
+// Node resolves indexURL with path.resolve, which mangles file:// URLs, so
+// rewrite the file:// indexURL worker.js derives into a plain path.
+let __loadPyodide = null;
+Object.defineProperty(globalThis, 'loadPyodide', {
+  configurable: true,
+  set(fn) {
+    __loadPyodide = (opts) => {
       if (opts && typeof opts.indexURL === 'string' && opts.indexURL.startsWith('file://')) {
         opts = { ...opts, indexURL: opts.indexURL.slice('file://'.length) };
       }
-      return orig(opts);
+      return fn(opts);
     };
-    fixed.__pathFix = true;
-    globalThis.loadPyodide = fixed;
-  }
-};
+  },
+  get() { return __loadPyodide; },
+});
 globalThis.fetch = async (url) => {
   const s = String(url);
   let p = s.startsWith('file://') ? s.slice('file://'.length) : s;
@@ -133,10 +139,14 @@ globalThis.fetch = async (url) => {
 `;
 
 fs.mkdirSync(path.join(os.tmpdir(), 'calibre-web-tests'), { recursive: true });
-const workerFile = path.join(os.tmpdir(), 'calibre-web-tests', 'worker-boot.js');
+// .mjs so Node unambiguously treats the concatenated preamble+worker as ESM,
+// exactly like a browser module worker.
+// pid-suffixed: concurrent runs of this suite must not overwrite each
+// other's boot file (a shared name lets one process boot another's harness).
+const workerFile = path.join(os.tmpdir(), 'calibre-web-tests', `worker-boot-${process.pid}.mjs`);
 fs.writeFileSync(workerFile, PREAMBLE + '\n' + workerSrc);
 
-const w = new Worker(workerFile, { type: 'commonjs', stdout: true, stderr: true });
+const w = new Worker(workerFile, { type: 'module', stdout: true, stderr: true });
 
 let nextId = 1;
 const pending = new Map();
@@ -158,8 +168,11 @@ w.on('message', (msg) => {
   const waiter = pending.get(msg.id);
   if (!waiter) return;
   pending.delete(msg.id);
-  if (msg.type === 'error') waiter.reject(new Error(msg.message));
-  else waiter.resolve(msg);
+  if (msg.type === 'error') {
+    const err = new Error(msg.message);
+    err.engineLog = msg.log; // calibre traceback lines, when the worker has them
+    waiter.reject(err);
+  } else waiter.resolve(msg);
 });
 w.on('error', (e) => { console.error('worker error:', e); process.exitCode = 1; });
 w.on('exit', (c) => {
@@ -217,6 +230,10 @@ try {
   if (fail) { failures.forEach(f => console.log('FAILED: ' + f)); process.exitCode = 1; }
 } catch (e) {
   console.error('TEST CRASH:', e);
+  if (e && Array.isArray(e.engineLog) && e.engineLog.length) {
+    console.error('--- engine log tail ---');
+    e.engineLog.slice(-25).forEach((l) => console.error('  ' + l));
+  }
   process.exitCode = 1;
 } finally {
   teardownDone = true;

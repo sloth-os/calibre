@@ -22,8 +22,9 @@ calibre has no wasm build, so the engine is assembled at build time:
    encoding detection, a Pillow-backed `qt.core` for cover generation, and three
    small source patches for wasm constraints (documented in `patches/apply-patches.py`).
 
-The worker (`worker.js`) fetches the bundle (~36 MB), unpacks it into the wasm
-filesystem, boots calibre in ~10 s, and then converts ebooks entirely in memory.
+The worker (`worker.js`, an ES **module** worker — pyodide rejects classic workers
+in browsers) fetches the bundle (~36 MB), unpacks it into the wasm filesystem, boots
+calibre in ~10 s, and then converts ebooks entirely in memory.
 
 ### Format support
 
@@ -63,8 +64,13 @@ PDB, PML, RB, SNB, TCR, OEB, ZIP/CBZ in — works, including generated covers.
 3. **Smoke-tests the actual bundle under Node**: boots the real worker and runs a
    real TXT→EPUB conversion with output validation (`tests/worker-integration.test.mjs`).
    A broken weekly build fails here instead of publishing.
-4. Assembles the site, generates the service-worker precache manifest, and deploys to
-   GitHub Pages.
+4. Assembles the site and generates the service-worker precache manifest, then
+   **gates the staged site before upload**: URL/layout contract checks derived from
+   the sources themselves (`.github/scripts/check-site-layout.mjs`), the Node smoke
+   re-run against the deployed geometry, and the whole site booted in headless
+   Chromium (`tests/browser-smoke.test.mjs`) — the only gate that can see
+   browser-only runtime guards and MIME handling.
+5. Deploys to GitHub Pages.
 
 `workflow_dispatch` with `skip_build: true` redeploys the site only, reusing the
 bundle from the latest successful run (for UI fixes without a rebuild).
@@ -74,7 +80,7 @@ bundle from the latest successful run (for UI fixes without a rebuild).
 | Path | Purpose |
 | --- | --- |
 | `index.html`, `app.js` | UI (no frameworks, no external resources) |
-| `worker.js` | Web Worker hosting the Pyodide runtime + calibre engine |
+| `worker.js` | module Web Worker hosting the Pyodide runtime + calibre engine |
 | `sw.js`, `offline.html`, `manifest.webmanifest` | PWA / offline / file-handling layer |
 | `shims/` | pure-Python shims for calibre's C extensions + a Pillow-backed `qt.core` |
 | `patches/build-bundle.sh` | assembles the wasm bundle (the heart of the build) |
@@ -82,7 +88,7 @@ bundle from the latest successful run (for UI fixes without a rebuild).
 | `patches/fetch-vendor-wheels.py` | wheels: pure-Python from PyPI, wasm builds from the pyodide CDN |
 | `patches/build-resources.py` | generates the iso639/iso3166 resource files from iso-codes data |
 | `.github/workflows/publish.yml` | weekly build & deploy pipeline |
-| `tests/` | Node test suites (worker integration drives the real bundle) |
+| `tests/` | Node test suites + headless-Chromium browser smoke (worker integration drives the real bundle) |
 | `icons/` | PWA icons (derived from calibre's logo) |
 | `dev/` | local development scratch (gitignored) |
 
@@ -97,10 +103,17 @@ node tests/run-all.mjs
 
 # serve the site locally: build into ./wasm — build-bundle.sh's output
 # layout (calibre-bundle.zip + pyodide/ side by side) IS the deployed
-# geometry worker.js expects at the site root
+# geometry worker.js expects at the site root. Use the bundled dev server:
+# worker.js is a module worker, and browsers reject module imports served
+# with a non-JavaScript MIME type (python's http.server may).
 ./patches/build-bundle.sh /path/to/calibre ./wasm
 cp wasm/bundle-info.json build-info.json   # version chip in the UI
-python3 -m http.server -d . 8080           # http://localhost:8080
+node tests/serve.mjs 8080                  # http://localhost:8080
+
+# optional: the real-browser smoke (headless Chromium boots the site and
+# converts TXT->EPUB — catches browser-only guards the Node harness can't)
+npm install --no-save playwright@1.65.0 && npx playwright install chromium
+node tests/browser-smoke.test.mjs .
 ```
 
 ## License / attribution

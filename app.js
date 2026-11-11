@@ -82,7 +82,9 @@
 
   // ------------------------------------------------------------ the worker --
   function bootWorker() {
-    worker = new Worker('./worker.js');
+    // Module worker: pyodide rejects classic workers ('Classic web workers
+    // are not supported'); worker.js imports pyodide.mjs dynamically.
+    worker = new Worker('./worker.js', { type: 'module' });
     worker.onmessage = function (ev) {
       var msg = ev.data;
       if (!msg || typeof msg !== 'object') return;
