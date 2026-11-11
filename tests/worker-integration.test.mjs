@@ -7,7 +7,11 @@
  * contract" note).
  *
  * Usage: node tests/worker-integration.test.mjs [bundle-dir]
- *   bundle-dir defaults to /tmp/bundle-out (patches/build-bundle.sh output)
+ *   bundle-dir defaults to /tmp/bundle-out (patches/build-bundle.sh output).
+ *   It may also be a STAGED SITE directory (site-publish): the test detects
+ *   the deployed layout (wasm/pyodide/ nested, wasm/calibre-bundle.zip) and
+ *   boots against it with no rewriting, so CI validates the exact geometry
+ *   GitHub Pages will serve.
  *
  * Verifies: boot, formats listing, TXT->EPUB conversion with a valid EPUB
  * result (zip + mimetype), and the error path (garbage input).
@@ -31,7 +35,13 @@ function check(name, cond, extra) {
   else { fail++; failures.push(name); console.log('FAIL  ' + name + (extra ? ' -- ' + extra : '')); }
 }
 
-if (!fs.existsSync(path.join(BUNDLE_DIR, 'calibre-bundle.zip'))) {
+// Two accepted layouts:
+//   bundle:    BUNDLE_DIR/calibre-bundle.zip + BUNDLE_DIR/pyodide/  (build output)
+//   staged site: BUNDLE_DIR/wasm/calibre-bundle.zip + BUNDLE_DIR/wasm/pyodide/
+const SITE_LAYOUT =
+  fs.existsSync(path.join(BUNDLE_DIR, 'wasm', 'calibre-bundle.zip')) &&
+  fs.existsSync(path.join(BUNDLE_DIR, 'wasm', 'pyodide', 'pyodide.js'));
+if (!SITE_LAYOUT && !fs.existsSync(path.join(BUNDLE_DIR, 'calibre-bundle.zip'))) {
   console.log(`SKIPPED (no bundle at ${BUNDLE_DIR}; run patches/build-bundle.sh first)`);
   process.exit(0);
 }
@@ -41,14 +51,15 @@ if (!fs.existsSync(path.join(BUNDLE_DIR, 'calibre-bundle.zip'))) {
 // self.onmessage / importScripts / fetch. Node's worker_threads has none of
 // those, so the worker file is prefixed with a preamble that polyfills them
 // (importScripts loads the local pyodide distribution via require, fetch
-// reads the bundle dir from disk) — worker.js itself runs unmodified.
+// reads from disk) — worker.js itself runs unmodified.
 const workerSrc = fs.readFileSync(path.join(REPO, 'worker.js'), 'utf8');
 
-console.log('booting worker with bundle', BUNDLE_DIR);
+console.log(`booting worker with ${SITE_LAYOUT ? 'staged site' : 'bundle'} layout at`, BUNDLE_DIR);
 
-// The worker resolves ./wasm/pyodide/... relative to its own location; the
-// bundle layout has pyodide/ at its root. A wasm -> . symlink mirrors the
-// deployed site layout so every URL resolves without touching worker.js.
+// The worker resolves ./wasm/pyodide/... relative to its own location. In a
+// staged site that path is real; for a raw bundle dir a wasm -> . symlink
+// mirrors the deployed layout so every URL resolves without touching
+// worker.js. (symlinkSync EEXIST is fine — a real wasm/ dir wins.)
 try {
   fs.symlinkSync('.', path.join(BUNDLE_DIR, 'wasm'), 'dir');
 } catch (e) {
@@ -79,7 +90,10 @@ Object.defineProperty(globalThis, 'onmessage', {
 
 globalThis.importScripts = (...urls) => {
   for (const u of urls) {
-    const p = u.startsWith('./wasm/') ? path.join(BUNDLE_DIR, u.slice('./wasm/'.length)) : u;
+    // Resolve './wasm/...' against the bundle dir itself: a staged site has a
+    // real wasm/ tree, a raw bundle dir has the wasm -> . symlink. Either way
+    // the worker's URL maps to bytes on disk without stripping the prefix.
+    const p = u.startsWith('./wasm/') ? path.join(BUNDLE_DIR, u.slice(2)) : u;
     // pyodide.js is a UMD bundle: require it and expose its exports.
     const mod = require(path.resolve(p));
     Object.assign(globalThis, mod);

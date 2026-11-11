@@ -146,8 +146,13 @@ jobs:
             --exclude='calibre' --exclude='.bundle-work' \
             --exclude='node_modules' --exclude='__pycache__' \
             ./ site-publish/
-          mkdir -p site-publish/wasm
-          cp wasm-stage/pyodide/* site-publish/wasm/
+          mkdir -p site-publish/wasm/pyodide
+          # Layout contract: worker.js imports ./wasm/pyodide/pyodide.js and
+          # fetches ./wasm/calibre-bundle.zip, and pyodide resolves its
+          # asm/stdlib files against indexURL ./wasm/pyodide/ — so the
+          # pyodide/ directory must stay NESTED (flattening it 404s the
+          # engine in production; check-site-layout.mjs guards this).
+          cp wasm-stage/pyodide/* site-publish/wasm/pyodide/
           cp wasm-stage/calibre-bundle.zip site-publish/wasm/
           cp wasm-stage/bundle-info.json site-publish/build-info.json
           echo '--- site-publish ---'
@@ -166,6 +171,19 @@ jobs:
         run: |
           node .github/scripts/generate-sw-manifest.mjs site-publish
           head -c 400 site-publish/sw-manifest.js; echo
+
+      - name: Verify staged site layout (worker/manifest URLs resolve)
+        run: |
+          node .github/scripts/check-site-layout.mjs site-publish
+
+      - name: Smoke-test the STAGED SITE under Node (deployed geometry)
+        run: |
+          # Re-boots the real engine against site-publish exactly as the
+          # browser will (wasm/pyodide/... nested, wasm/calibre-bundle.zip),
+          # so a staging/layout regression fails the build instead of the
+          # live site. The earlier wasm-stage run tests bundle CONTENT; this
+          # one tests bundle + layout TOGETHER.
+          node tests/worker-integration.test.mjs "$GITHUB_WORKSPACE/site-publish"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

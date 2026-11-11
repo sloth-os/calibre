@@ -95,10 +95,12 @@ bundle from the latest successful run (for UI fixes without a rebuild).
 # run the tests (the worker integration boots the real engine)
 node tests/run-all.mjs
 
-# serve the site locally: assemble like CI does
-./patches/build-bundle.sh /path/to/calibre ./wasm && \
-  cp -r wasm/pyodide wasm-stage 2>/dev/null; # see publish.yml "Stage site assets"
-python3 -m http.server -d . 8080
+# serve the site locally: build into ./wasm — build-bundle.sh's output
+# layout (calibre-bundle.zip + pyodide/ side by side) IS the deployed
+# geometry worker.js expects at the site root
+./patches/build-bundle.sh /path/to/calibre ./wasm
+cp wasm/bundle-info.json build-info.json   # version chip in the UI
+python3 -m http.server -d . 8080           # http://localhost:8080
 ```
 
 ## License / attribution
