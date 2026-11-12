@@ -96,6 +96,10 @@ jobs:
           # UI/manifest/SW/shim unit suites. The engine suites legitimately
           # SKIP here (no bundle yet, playwright not installed) — they run
           # explicitly, with --require-ran semantics, after staging below.
+          # shims.test.mjs exercises the uchardet shim, which wraps the
+          # chardet package — production vendors it as a wheel at this exact
+          # pin (see patches/fetch-vendor-wheels.py), so install the same.
+          python -m pip install --quiet 'chardet==5.2.0'
           node tests/run-all.mjs
 
       - name: Build the wasm bundle

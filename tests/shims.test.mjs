@@ -26,8 +26,12 @@ function check(name, cond, extra) {
 
 // ------------------------------------------------------ python harness ----
 // The shims run inside the site-packages-free wasm env; locally we provide the
-// pure-python deps the tested shims import (none for speedup/icu/entities/
-// cPalmdoc/translator/uchardet) via PYTHONPATH stubs where needed.
+// pure-python deps the tested shims import via PYTHONPATH stubs where needed.
+// speedup/icu/entities/cPalmdoc/translator need nothing; uchardet wraps the
+// `chardet` package (production vendors chardet==5.2.0 as a wheel — CI pip-
+// installs the same pin before this suite; see publish.yml + fetch-vendor-
+// wheels.py). Pillow/lxml (qt/html5_parser shims) are wasm .so's in the
+// bundle, so those shims are syntax-checked on hosts without native PIL.
 const PY = `
 import sys, os, json, traceback
 sys.path.insert(0, ${JSON.stringify(SHIMS)})
