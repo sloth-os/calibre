@@ -221,6 +221,19 @@ jobs:
         with:
           path: site-publish
 
+      # Second copy of the EXACT staged tree for the deploy job's live
+      # verification (md5 comparisons). It cannot be reconstructed there:
+      # sw-manifest.js embeds a timestamped version stamp, so regenerating
+      # would differ from the deployed bytes. Short retention — verification
+      # happens minutes later.
+      - name: Upload staged site (for live verification)
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-publish-verify
+          path: site-publish/
+          retention-days: 1
+          if-no-files-found: error
+
   deploy:
     needs: build
     runs-on: ubuntu-24.04
@@ -248,9 +261,10 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Download the deployed Pages artifact
-        uses: actions/download-pages-artifact@v1
+      - name: Download the deployed site tree (staged bytes)
+        uses: actions/download-artifact@v4
         with:
+          name: site-publish-verify
           path: site-publish
 
       - name: Verify the LIVE site (bytes, precache URLs, MIME)
