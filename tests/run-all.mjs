@@ -47,20 +47,23 @@ async function runSuite(name) {
   return new Promise((resolve) => {
     const proc = spawn('node', [path.join(TESTS_DIR, name)], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
- let timer = setTimeout(() => {
+    let timer = setTimeout(() => {
       proc.kill('SIGKILL');
       resolve({ name, status: 'TIMEOUT', out });
- }, TIMEOUT_MS);
+    }, TIMEOUT_MS);
     proc.stdout.on('data', (d) => { out += d; });
- proc.stderr.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { out += d; });
     proc.on('error', (err) => {
       clearTimeout(timer);
       resolve({ name, status: 'CRASH', out: out + String(err) });
     });
     proc.on('close', (code) => {
       clearTimeout(timer);
-      if (/^SKIPPED/m.test(out)) resolve({ name, status: 'SKIPPED', out });
- else resolve({ name, status: code === 0 ? 'PASS' : 'FAIL', out });
+      // SKIPPED only counts when the suite also exited clean — a suite that
+      // prints SKIPPED and then fails (or crashes) is a FAIL, not a free
+      // pass; the skip line must describe the whole run, not mask its end.
+      if (code === 0 && /^SKIPPED/m.test(out)) resolve({ name, status: 'SKIPPED', out });
+      else resolve({ name, status: code === 0 ? 'PASS' : 'FAIL', out });
     });
   });
 }

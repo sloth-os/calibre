@@ -99,7 +99,10 @@ jobs:
           # shims.test.mjs exercises the uchardet shim, which wraps the
           # chardet package — production vendors it as a wheel at this exact
           # pin (see patches/fetch-vendor-wheels.py), so install the same.
-          python -m pip install --quiet 'chardet==5.2.0'
+          # Pillow backs the qt/imageops shims (production ships the pyodide
+          # wasm wheel, version tracked by pyodide-lock.json); installing it
+          # here lights up their rows in the suite instead of skipping them.
+          python -m pip install --quiet 'chardet==5.2.0' Pillow
           node tests/run-all.mjs
 
       - name: Build the wasm bundle

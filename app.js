@@ -220,12 +220,21 @@
   }
 
   // ------------------------------------------------------------ conversion --
+  // Shared with the service-worker update reload (registerServiceWorker):
+  // book.data and an in-flight conversion exist only in memory, so a
+  // controllerchange reload mid-conversion would destroy the user's work.
+  // The handler defers while `converting` is true; doConvert's error path
+  // takes the reload once the conversion ends.
+  var converting = false;
+  var pendingReload = false;
+
   function doConvert() {
     if (!book || !book.data) return;
     var fmt = formatSelect.value;
     if (!fmt) return;
     convertBtn.disabled = true;
     clearBtn.disabled = true;
+    converting = true;
     setStatus('Converting to ' + fmt.toUpperCase() + '…');
     logLine('— converting ' + book.name + ' → ' + fmt.toUpperCase());
     var t0 = performance.now();
@@ -235,16 +244,26 @@
       outputFormat: fmt,
     }).then(function (msg) {
       var dt = (performance.now() - t0) / 1000;
- convertBtn.disabled = false;
+      converting = false;
+      convertBtn.disabled = false;
       clearBtn.disabled = false;
       addDownload(msg.name, msg.data, msg.size);
       setStatus('Converted to ' + fmt.toUpperCase() + ' in ' + dt.toFixed(1) + 's.', 'ok');
       logLine('— done in ' + dt.toFixed(1) + 's (' + humanSize(msg.size) + ')');
+      // Deliberately NO reload on success even if pendingReload: reloading
+      // now would destroy the download row the user just waited for. This
+      // worker produced a good file — the update lands on the next natural
+      // reload instead.
     }).catch(function (err) {
+      converting = false;
       convertBtn.disabled = false;
       clearBtn.disabled = false;
       setStatus('Conversion failed: ' + err.message, 'err');
       logLine('— failed: ' + err.message);
+      // Failed with a deferred SW update pending: take the reload now —
+      // the new worker may be exactly the fix, and there is no output to
+      // lose.
+      if (pendingReload) window.location.reload();
     });
   }
 
@@ -336,6 +355,31 @@
   // ------------------------------------------------------- PWA + environment --
   function registerServiceWorker() {
     if ('serviceWorker' in navigator) {
+      // One-shot reload on update: a returning user's page keeps talking to
+      // the OLD service worker (and its old precache — old engine bundle)
+      // until it reloads, so without this the user runs the previous deploy
+      // for a full session after an update. sw.js skipWaiting()s on healthy
+      // installs, which fires 'controllerchange' on controlled clients when
+      // the new worker takes over; reload once at that point.
+      // hadController is captured BEFORE register: a first visit has no
+      // controller, and if the new worker ever claimed this client it would
+      // also fire 'controllerchange' — reloading then risks a loop
+      // (install -> claim -> reload -> install -> ...).
+      var hadController = Boolean(navigator.serviceWorker.controller);
+      var refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!hadController || refreshing) return;
+        if (converting) {
+          // A reload would kill the in-flight conversion (book.data and the
+          // worker session are memory-only); doConvert's error path takes
+          // the deferred reload once the conversion ends, and the success
+          // path deliberately keeps the page so the user can save output.
+          pendingReload = true;
+          return;
+        }
+        refreshing = true;
+        window.location.reload();
+      });
       // updateViaCache 'none': sw.js itself is byte-stable across builds — the
       // update signal is the CI-generated sw-manifest.js it importScripts.
       // Pages serves that with cache-control max-age=600, and the default

@@ -75,6 +75,27 @@ check('app.js registers sw.js', /navigator\.serviceWorker\.register\('\.\/sw\.js
 // 'none' keeps update checks from serving a stale manifest for up to 10 min.
 check("app.js registers with { updateViaCache: 'none' }",
   /navigator\.serviceWorker\.register\('\.\/sw\.js',\s*\{\s*updateViaCache:\s*'none'\s*\}\)/.test(app));
+// Returning users keep talking to the OLD service worker (old precache, old
+// engine) until the page reloads: sw.js skipWaiting()s on healthy installs,
+// and app.js must reload once on 'controllerchange'. The hadController guard
+// (captured BEFORE register) keeps a first visit's clientsClaim-style
+// controllerchange from looping reloads.
+check('app.js one-shot reloads on controllerchange with a first-visit guard',
+  /hadController\s*=\s*Boolean\(navigator\.serviceWorker\.controller\)/.test(app) &&
+  /addEventListener\('controllerchange'/.test(app) &&
+  /if\s*\(!hadController\s*\|\|\s*refreshing\)\s*return/.test(app) &&
+  /refreshing\s*=\s*true/.test(app) &&
+  /window\.location\.reload\(\)/.test(app));
+// The reload must NOT fire mid-conversion: book.data and the worker session
+// are memory-only, so controllerchange defers while `converting` and
+// doConvert's error path takes the reload once the conversion ends (the
+// success path keeps the page so the download row survives).
+check('app.js defers the controllerchange reload while converting',
+  /var converting = false;/.test(app) &&
+  /var pendingReload = false;/.test(app) &&
+  /if\s*\(converting\)\s*\{[\s\S]*?pendingReload = true;[\s\S]*?return;/.test(app) &&
+  /converting = true;/.test(app) &&
+  /if\s*\(pendingReload\)\s*window\.location\.reload\(\);/.test(app));
 
 // ---- formats list wiring ----
 check('format dropdown built from engine-reported formats (renderFormatOptions)',

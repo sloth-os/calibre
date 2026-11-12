@@ -1,8 +1,9 @@
 # speedup — pure-Python implementation of the speedup C API the conversion
 # pipeline touches. The C module has more functions (websocket_mask,
-# create_texture, set_thread_name, pread_all, ...) that the conversion path
-# never calls; they are intentionally absent.
+# create_texture, set_thread_name, ...) that the conversion path never
+# calls; they are intentionally absent.
 
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -102,6 +103,36 @@ def pread_all(fd, n, offset=0):
     if n <= 0:
         return b''
     return _os.pread(fd, int(n), int(offset))
+
+
+def pdf_float(f) -> str:
+    """Format a float for PDF content streams. Ports speedup.c pdf_float()
+    exactly (calibre/ebooks/pdf/render/common.py imports it for the
+    PAPER_SIZES table, which DOCX output reaches):
+
+    * |f| <= 1e-7           -> '0'
+    * |f| > 1: precision = clamp(6 - int(log10(|f|)), 0, 6); else 6
+    * render with that many decimals, then strip trailing zeros and a
+      trailing '.' ONLY when precision > 0 (integer-valued large floats
+      keep their zeros — '1000000' must not become '1'), and normalize a
+      locale decimal comma to '.'.
+
+    Used by DOCX output via pdf/render/common.py; pinned against the
+    C-derived vectors in tests/shims.test.mjs.
+    """
+    f = float(f)
+    a = abs(f)
+    if a <= 1e-7:
+        return '0'
+    precision = 6
+    if a > 1:
+        precision = min(max(0, 6 - int(math.log10(a))), 6)
+    s = f'{f:.{precision}f}'
+    if precision > 0:
+        s = s.rstrip('0')
+        if s.endswith('.') or s.endswith(','):
+            s = s[:-1]
+    return s.replace(',', '.')
 
 
 def parse_iso8601(date_string: str):

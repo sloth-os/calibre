@@ -60,6 +60,18 @@ def ensure_app(headless=True):
     return _app
 
 
+def must_use_qt(headless=True):
+    """Mirror of calibre.gui2.must_use_qt: on desktop it asserts a
+    QApplication exists and that the caller is on the GUI thread before
+    non-GUI Qt rendering (SVG rasterization in oeb/transforms/rasterize.py,
+    HTML rendering). The wasm build has no Qt event loop and no threads —
+    the qt shim renders through Pillow on the worker's only thread — so
+    this degenerates to the ensure_app() marker. Code needing a REAL
+    QApplication (none on the conversion path) is unsupported."""
+    ensure_app(headless=headless)
+    return None
+
+
 def load_builtin_fonts():
     """Point the qt shim's QFont at the shipped Liberation faces."""
     global _fonts_loaded

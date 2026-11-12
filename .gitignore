@@ -1,5 +1,8 @@
 # Built artifacts (CI publishes fresh ones weekly; not committed)
-wasm/
+# No trailing slash on wasm: local dev symlinks it at the repo root for
+# browser-smoke, and 'wasm/' would not match a symlink (same trap that once
+# committed a node_modules symlink).
+wasm
 site-publish/
 wasm-stage/
 .bundle-work/

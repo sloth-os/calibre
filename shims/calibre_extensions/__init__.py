@@ -22,5 +22,7 @@
 #   fast_html_entities  HTML entity replacement
 #   cPalmdoc     Palmdoc compression (PDB/DOC)
 #   translator   gettext .mo catalogs
-#   imageops     keeps calibre.utils.img importable; bridges to Pillow paths
+#   imageops     image filters bridged to Pillow (img.py filter wrappers)
+#   progress_indicator  no-op set_image_allocation_limit (imported by
+#                calibre.utils.img on every image decode)
 #   uchardet     encoding detection (via chardet)

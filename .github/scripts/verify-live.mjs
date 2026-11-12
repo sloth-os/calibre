@@ -19,7 +19,11 @@
 //      manifest.webmanifest, offline.html)
 //   3. every URL in the LIVE sw-manifest precache list returns 200 with the
 //      MIME type the runtime requires (.mjs/.js JavaScript, .wasm
-//      application/wasm, .webmanifest manifest+json, ...)
+//      application/wasm, .webmanifest manifest+json, ...) — and the big
+//      binaries (.zip/.wasm) match the staged tree's content-length exactly
+//      (HEAD with identity encoding — Pages gzips those bodies for clients
+//      advertising gzip, which would report the COMPRESSED length — inside
+//      a bounded retry window for edge-POP skew)
 //
 // Node >= 18 (global fetch), zero npm dependencies. Exit 0 = live site good.
 import fs from 'node:fs';
@@ -55,6 +59,7 @@ async function get(url) {
 // buster) until the deployment markers match the staged bytes.
 const MARKERS = ['sw-manifest.js', 'build-info.json'];
 const MAX_TRIES = 24;        // 24 * 20 s = 8 minutes
+const SIZE_TRIES = 6;        // per-asset content-length retry window
 const POLL_MS = 20_000;
 console.log(`verify-live: waiting for ${BASE} to serve the deployed bytes`);
 let propagated = false;
@@ -125,6 +130,42 @@ for (const asset of assets) {
   check(`${asset} 200`, res.ok || res.status === 206, `HTTP ${res.status}${res.error ? ' ' + res.error.message : ''}`);
   if (want) {
     check(`${asset} content-type ${want.source}`, want.test(ctype), `got '${ctype}'`);
+  }
+  // Size check for the huge binaries step 2 deliberately doesn't md5 (the
+  // ~22 MB engine bundle and pyodide's .wasm files): content-length must
+  // equal the staged file's size, or a truncated/partial upload would pass
+  // every check above. Two Pages/Fastly realities shape the probe:
+  //   (a) the CDN gzips these bodies for clients that advertise gzip —
+  //       undici's fetch default does — and then content-length is the
+  //       COMPRESSED size (measured: 3.5 MB vs the real 9.6 MB), so the
+  //       probe must request identity encoding;
+  //   (b) a ?cb= query is NOT part of Pages' cache key (identical
+  //       etag/expires/x-cache across cb values), so a cache-buster buys
+  //       nothing against a POP still holding the previous deploy — a
+  //       bounded retry window rides that out instead.
+  if (ext === '.zip' || ext === '.wasm') {
+    const rel = asset.replace(/^\.\//, '').replace(/^\//, '');
+    const stagedPath = path.join(STAGED, rel);
+    if (!fs.existsSync(stagedPath)) {
+      check(`${asset} size vs staged`, false, `asset not in staged tree (${stagedPath})`);
+    } else {
+      const wantSize = fs.statSync(stagedPath).size;
+      let ok = false, got = 0, status = 0, error = null;
+      for (let t = 1; t <= SIZE_TRIES; t++) {
+        const probe = await fetch(url, {
+          method: 'HEAD',
+          headers: { 'accept-encoding': 'identity' },
+        }).catch((e) => ({ ok: false, status: 0, headers: null, error: e }));
+        status = probe.status;
+        error = probe.error || null;
+        got = Number(probe.headers ? probe.headers.get('content-length') : 0) || 0;
+        ok = probe.ok && got === wantSize;
+        if (ok || t === SIZE_TRIES) break;
+        await new Promise((r) => setTimeout(r, POLL_MS));
+      }
+      check(`${asset} content-length ${wantSize}`, ok,
+        `live ${got} (HTTP ${status}${error ? ' ' + error.message : ''}) after ${SIZE_TRIES * POLL_MS / 1000}s window`);
+    }
   }
 }
 
