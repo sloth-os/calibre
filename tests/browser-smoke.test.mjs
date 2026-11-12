@@ -11,13 +11,19 @@
  * the pyodide boot with its browser-only checks, ESM/wasm MIME handling,
  * and a real TXT->EPUB conversion.
  *
- * Usage: node tests/browser-smoke.test.mjs [site-dir]
+ * Usage: node tests/browser-smoke.test.mjs [site-dir] [--require-ran]
  *   site-dir defaults to the repo root (local dev layout with ./wasm).
- *   CI points it at the staged site-publish tree.
+ *   CI points it at the staged site-publish tree and passes --require-ran.
+ *
+ * The site is served UNDER THE /calibre/ SUBPATH — production geometry
+ * (https://sloth-os.github.io/calibre/). Root-absolute URLs ('/worker.js')
+ * 404 here exactly like they do on Pages, so a subpath-breaking regression
+ * fails this suite instead of shipping.
  *
  * SKIPPED (exit 0) when the site has no engine, or playwright / its Chromium
- * binary are not installed — CI installs both; local runs do not require
- * them.
+ * binary are not installed — local runs do not require them. With
+ * --require-ran (CI) every skip is a hard failure: the deploy must never
+ * proceed on zero browser verification.
  */
 import fs from 'node:fs';
 import http from 'node:http';
@@ -26,7 +32,19 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
-const SITE = process.argv[2] ? path.resolve(process.argv[2]) : REPO;
+const ARGS = process.argv.slice(2);
+const REQUIRE_RAN = ARGS.includes('--require-ran');
+const SITE_ARG = ARGS.find((a) => !a.startsWith('--'));
+const SITE = SITE_ARG ? path.resolve(SITE_ARG) : REPO;
+
+function skip(reason) {
+  if (REQUIRE_RAN) {
+    console.error('FAIL (--require-ran): ' + reason);
+    process.exit(1);
+  }
+  console.log('SKIPPED (' + reason + ')');
+  process.exit(0);
+}
 
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
@@ -36,16 +54,14 @@ function check(name, cond, extra) {
 
 if (!fs.existsSync(path.join(SITE, 'wasm', 'pyodide', 'pyodide.mjs')) ||
     !fs.existsSync(path.join(SITE, 'wasm', 'calibre-bundle.zip'))) {
-  console.log(`SKIPPED (no engine under ${SITE}/wasm; run patches/build-bundle.sh first)`);
-  process.exit(0);
+  skip(`no engine under ${SITE}/wasm; run patches/build-bundle.sh first`);
 }
 
 let chromium;
 try {
   ({ chromium } = await import('playwright'));
 } catch {
-  console.log('SKIPPED (playwright not installed — npm i --no-save playwright && npx playwright install chromium)');
-  process.exit(0);
+  skip('playwright not installed — npm i --no-save playwright && npx playwright install chromium');
 }
 
 // Explicit MIME map: WebAssembly.instantiateStreaming requires
@@ -65,9 +81,18 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+// Production mounts the site under a subpath; serve it the same way so
+// root-absolute URL regressions fail here instead of on the live site.
+const PREFIX = 'calibre/';
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
-  let rel = decodeURIComponent(u.pathname).replace(/^\/+/, '');
+  const p = decodeURIComponent(u.pathname).replace(/^\/+/, '');
+  if (!p.startsWith(PREFIX)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('not found (the site is served under /' + PREFIX + ' only, like production)');
+    return;
+  }
+  let rel = p.slice(PREFIX.length);
   if (rel === '' || rel.endsWith('/')) rel += 'index.html';
   const file = path.resolve(SITE, '.' + path.sep + rel);
   if (!file.startsWith(SITE + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -81,17 +106,15 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const BASE = `http://127.0.0.1:${server.address().port}/`;
+const BASE = `http://127.0.0.1:${server.address().port}/${PREFIX}`;
 console.log('serving', SITE, 'at', BASE);
 
 let browser;
 try {
   browser = await chromium.launch({ args: ['--no-sandbox'] });
 } catch (err) {
-  console.log('SKIPPED (chromium unavailable: ' + String(err.message).split('\n')[0] +
-    ' — npx playwright install chromium)');
-  server.close();
-  process.exit(0);
+  skip('chromium unavailable: ' + String(err.message).split('\n')[0] +
+    ' — npx playwright install chromium');
 }
 
 try {

@@ -36,14 +36,38 @@ function check(name, cond, extra) {
   else { fail++; failures.push(name); console.log('FAIL  ' + name + (extra ? ' -- ' + extra : '')); }
 }
 
+// Node >= 23 backs Buffers with shared 64 KB slabs: `.buffer` is the WHOLE
+// slab (byteLength 65536, possibly carrying other allocations' leftovers),
+// not just this string's bytes — and worker.js reads the whole backing store
+// (new Uint8Array(msg.input)). Sending `.buffer` fed the engine tens of KB of
+// NULs/garbage and made this suite flaky (~1 in 3: "embedded null byte" /
+// "All strings must be XML compatible"). Slice exactly, like the browser's
+// file.arrayBuffer() and TextEncoder do.
+function exactUtf8(str) {
+  const b = Buffer.from(str, 'utf8');
+  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+}
+
 // Two accepted layouts:
 //   bundle:    BUNDLE_DIR/calibre-bundle.zip + BUNDLE_DIR/pyodide/  (build output)
 //   staged site: BUNDLE_DIR/wasm/calibre-bundle.zip + BUNDLE_DIR/wasm/pyodide/
+// Marker = the entry the runtime actually loads (pyodide.mjs — the module
+// worker's import target). Keying on a file nothing loads (e.g. the unused
+// pyodide.js UMD build) would silently SKIP this suite the moment that file
+// is cleaned up from the bundle.
 const SITE_LAYOUT =
   fs.existsSync(path.join(BUNDLE_DIR, 'wasm', 'calibre-bundle.zip')) &&
-  fs.existsSync(path.join(BUNDLE_DIR, 'wasm', 'pyodide', 'pyodide.js'));
+  fs.existsSync(path.join(BUNDLE_DIR, 'wasm', 'pyodide', 'pyodide.mjs'));
 if (!SITE_LAYOUT && !fs.existsSync(path.join(BUNDLE_DIR, 'calibre-bundle.zip'))) {
-  console.log(`SKIPPED (no bundle at ${BUNDLE_DIR}; run patches/build-bundle.sh first)`);
+  const missing = `no engine at ${BUNDLE_DIR} (need wasm/calibre-bundle.zip + wasm/pyodide/pyodide.mjs, or calibre-bundle.zip at the root)`;
+  // An explicitly passed dir (CI) without an engine is a HARD failure: a
+  // silent SKIP there is exactly the green-but-unverified hole this suite
+  // exists to close. The default dir (local dev) may legitimately be absent.
+  if (process.argv[2]) {
+    console.error('FAIL: ' + missing);
+    process.exit(1);
+  }
+  console.log(`SKIPPED (${missing}; run patches/build-bundle.sh first)`);
   process.exit(0);
 }
 
@@ -204,7 +228,7 @@ try {
  '\n\nChapter Two\n\nIt was the best of times. '.repeat(100));
   const conv = await send('convert', {
  name: 'test.txt',
-    input: Buffer.from(txt, 'utf8').buffer,
+    input: exactUtf8(txt),
     outputFormat: 'epub',
   });
   check('convert TXT->EPUB returns a result', conv.type === 'convert-result', JSON.stringify(conv).slice(0, 100));
@@ -217,14 +241,20 @@ try {
   const zipEnd = bytes.indexOf(Buffer.from('mimetypeapplication/epub+zip'));
   check('epub: mimetype entry present', zipEnd > 0);
 
-  // Garbage input -> clean error (not a hang)
+  // Garbage input -> clean engine-level error (or a tolerated conversion),
+  // never a hang or a worker crash. send() rejects precisely on the worker's
+  // {type:'error'} message; a hang would surface as the run-level timeout
+  // instead, so any resolution/rejection here is a clean outcome.
   const bad = await send('convert', {
     name: 'bad.epub',
-    input: Buffer.from('this is not an ebook at all, just some text', 'utf8').buffer,
+    input: exactUtf8('this is not an ebook at all, just some text'),
     outputFormat: 'azw3',
   }).then(m => ({ ok: true, m }), e => ({ ok: false, e }));
-  check('garbage input: rejected or errored cleanly', true,
- bad.ok ? 'converted anyway (tolerated)' : 'error: ' + bad.e.message.slice(0, 80));
+  check('garbage input: rejected or errored cleanly',
+    bad.ok ? bad.m.type === 'convert-result'
+ : bad.e instanceof Error && bad.e.message.length > 0,
+ bad.ok ? 'converted anyway (tolerated): ' + JSON.stringify(bad.m).slice(0, 80)
+ : 'clean error: ' + String(bad.e && bad.e.message).slice(0, 120));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail) { failures.forEach(f => console.log('FAILED: ' + f)); process.exitCode = 1; }

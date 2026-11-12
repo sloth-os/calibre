@@ -91,6 +91,13 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Run static test suites (fail fast, before the long build)
+        run: |
+          # UI/manifest/SW/shim unit suites. The engine suites legitimately
+          # SKIP here (no bundle yet, playwright not installed) — they run
+          # explicitly, with --require-ran semantics, after staging below.
+          node tests/run-all.mjs
+
       - name: Build the wasm bundle
         if: ${{ !inputs.skip_build }}
         run: |
@@ -147,9 +154,9 @@ jobs:
             --exclude='node_modules' --exclude='__pycache__' \
             ./ site-publish/
           mkdir -p site-publish/wasm/pyodide
-          # Layout contract: worker.js imports ./wasm/pyodide/pyodide.js and
+          # Layout contract: worker.js imports ./wasm/pyodide/pyodide.mjs and
           # fetches ./wasm/calibre-bundle.zip, and pyodide resolves its
-          # asm/stdlib files against indexURL ./wasm/pyodide/ — so the
+          # asm/stdlib/lock files against indexURL ./wasm/pyodide/ — so the
           # pyodide/ directory must stay NESTED (flattening it 404s the
           # engine in production; check-site-layout.mjs guards this).
           cp wasm-stage/pyodide/* site-publish/wasm/pyodide/
@@ -197,9 +204,13 @@ jobs:
           # The Node harnesses cannot see browser-only runtime guards (e.g.
           # pyodide rejecting classic workers) or MIME-sensitive paths (wasm
           # streaming, ESM imports) — real headless Chromium can. Boots the
-          # staged site end to end: app.js module worker -> pyodide -> engine
-          # ready -> real TXT->EPUB conversion.
-          node tests/browser-smoke.test.mjs "$GITHUB_WORKSPACE/site-publish"
+          # staged site end to end UNDER THE /calibre/ SUBPATH (production
+          # geometry: root-absolute URLs must break here, not on the live
+          # site): app.js module worker -> pyodide -> engine ready -> real
+          # TXT->EPUB conversion. --require-ran: a SKIP (missing engine,
+          # failed playwright install) fails the build instead of silently
+          # deploying with zero browser verification.
+          node tests/browser-smoke.test.mjs "$GITHUB_WORKSPACE/site-publish" --require-ran
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -216,3 +227,30 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
+
+      # ------------------------------------------------ live verification --
+      # Both production incidents were found by a human loading the site, not
+      # by CI: every pre-deploy gate shares the runner's environment, while
+      # the live origin adds the /calibre/ subpath and Fastly's real MIME and
+      # caching behaviour. This step is the only check that sees production
+      # as the browser does — it must pass before a deploy is called done.
+      - name: Check out site repository (verification script)
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (live verification)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download the deployed Pages artifact
+        uses: actions/download-pages-artifact@v1
+        with:
+          path: site-publish
+
+      - name: Verify the LIVE site (bytes, precache URLs, MIME)
+        run: |
+          node .github/scripts/verify-live.mjs \
+            "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" \
+            "$GITHUB_WORKSPACE/site-publish"

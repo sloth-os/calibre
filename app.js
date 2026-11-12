@@ -157,6 +157,15 @@
     })).then(function (realFiles) {
       var file = realFiles[0];
       if (!file) return;
+      // The UI converts one book at a time. A share/launch/drop can carry
+      // several files, and the shared-cache copies are deleted before this
+      // point (so a reload can never double-ingest) — the extras must not
+      // vanish silently: name them in the status line.
+      var extras = realFiles.slice(1);
+      if (extras.length) {
+        console.warn('[calibre-web] ignoring extra incoming file(s):',
+          extras.map(function (f) { return f.name; }).join(', '));
+      }
       book = { name: baseName(file.name), size: file.size, metadata: null };
       logLines = [];
       consoleEl.textContent = '';
@@ -164,7 +173,15 @@
       setStatus('Reading ' + book.name + '…');
       file.arrayBuffer().then(function (buf) {
         book.data = buf;
-        setStatus('Loaded ' + humanSize(book.size) + '. Pick a format and Convert.', 'ok');
+        var extraNote = '';
+        if (extras.length) {
+          var names = extras.slice(0, 3).map(function (f) { return baseName(f.name); }).join(', ');
+          extraNote = ' Ignoring ' + extras.length + ' more file' + (extras.length > 1 ? 's' : '') +
+            ' (' + names + (extras.length > 3 ? ', …' : '') +
+            ') — one book at a time; share them again individually.';
+        }
+        setStatus('Loaded ' + humanSize(book.size) + '. Pick a format and Convert.' + extraNote,
+          extras.length ? undefined : 'ok');
         convertBtn.disabled = false;
         askMetadata();
       }).catch(function (err) {
@@ -319,7 +336,12 @@
   // ------------------------------------------------------- PWA + environment --
   function registerServiceWorker() {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(function (err) {
+      // updateViaCache 'none': sw.js itself is byte-stable across builds — the
+      // update signal is the CI-generated sw-manifest.js it importScripts.
+      // Pages serves that with cache-control max-age=600, and the default
+      // ('imports') lets the HTTP cache hide a new manifest for up to 10
+      // minutes; 'none' makes every update check revalidate it immediately.
+      navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(function (err) {
         console.warn('[calibre-web] service worker registration failed:', err);
       });
     }

@@ -8,7 +8,7 @@ wasm-stage/
 dev/vendor/
 dev/stage/
 /build-info.json
-node_modules/
+node_modules
 *.log
 .DS_Store
 __pycache__/

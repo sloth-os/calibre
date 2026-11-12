@@ -34,9 +34,13 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+// Production serves the site under the /calibre/ subpath; alias it so local
+// dev can exercise the real geometry (relative-URL-only site) by visiting
+// http://localhost:PORT/calibre/ — same content as /.
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost');
   let rel = decodeURIComponent(u.pathname).replace(/^\/+/, '');
+  if (rel.startsWith('calibre/')) rel = rel.slice('calibre/'.length);
   if (rel === '' || rel.endsWith('/')) rel += 'index.html';
   const file = path.resolve(ROOT, '.' + path.sep + rel);
   if (!file.startsWith(ROOT + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {

@@ -70,7 +70,11 @@ check('worker protocol: boot-progress handled by the app',
   /boot-progress/.test(worker) && /boot-progress/.test(app));
 
 // ---- service worker registration ----
-check('app.js registers sw.js', /navigator\.serviceWorker\.register\('\.\/sw\.js'\)/.test(app));
+check('app.js registers sw.js', /navigator\.serviceWorker\.register\('\.\/sw\.js'/.test(app));
+// The update signal is sw-manifest.js (HTTP-cached max-age=600 by Pages);
+// 'none' keeps update checks from serving a stale manifest for up to 10 min.
+check("app.js registers with { updateViaCache: 'none' }",
+  /navigator\.serviceWorker\.register\('\.\/sw\.js',\s*\{\s*updateViaCache:\s*'none'\s*\}\)/.test(app));
 
 // ---- formats list wiring ----
 check('format dropdown built from engine-reported formats (renderFormatOptions)',

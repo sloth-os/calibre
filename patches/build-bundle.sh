@@ -18,7 +18,8 @@ OUT="$(readlink -f "${2:?usage: build-bundle.sh <calibre-clone> <out-dir> [workd
 WORK="${3:-$(mktemp -d)}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # patches/ dir
-PYODIDE_VERSION="314.0.7"
+# Overridable via env (publish.yml pins it as a workflow-level env var).
+PYODIDE_VERSION="${PYODIDE_VERSION:-314.0.7}"
 
 echo "== calibre wasm bundle build =="
 echo "calibre clone: $CALIBRE"

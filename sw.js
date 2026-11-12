@@ -77,22 +77,40 @@ self.addEventListener('install', function (event) {
   event.waitUntil(
     (async function () {
       if (ASSET_URLS.length === 0) {
-        // No generated manifest (local dev / broken build): still activate so
-        // the worker is never stuck waiting.
-        console.warn('[sw] __SW_ASSETS__ is missing or empty — nothing precached');
-      } else {
-        const cache = await caches.open(CACHE);
-        // Precache one by one: a single huge addAll() fails atomically, and
-        // the ~60 MB payload should cache whatever it can on flaky links.
-        await Promise.all(ASSET_URLS.map(async function (url) {
+        // sw-manifest.js failed to load (or is empty). FAIL CLOSED: do not
+        // skipWaiting — a previously active worker (with a complete versioned
+        // cache) keeps serving, and this worker must never delete caches if
+        // it does activate (first install; see the activate guard). A
+        // fail-open install here would replace a good build with an empty
+        // 'calibre-web-dev' cache and wipe the user's offline engine with no
+        // automatic repair: sw.js is byte-stable across builds, so no update
+        // check would ever retry the failed importScripts.
+        console.error('[sw] __SW_ASSETS__ is missing or empty — refusing to supersede the active worker');
+        return;
+      }
+      const cache = await caches.open(CACHE);
+      // Precache one by one: a single huge addAll() fails atomically, and the
+      // ~36 MB payload should cache whatever it can on flaky links. Every
+      // miss gets one retry — transient failures (flaky links, a CDN serving
+      // its own stale 404s right after a redeploy) resolve on the second
+      // pass. A durable hole self-heals online via the cache-first network
+      // fallback's cache.put.
+      let queue = ASSET_URLS;
+      for (let pass = 1; pass <= 2 && queue.length; pass++) {
+        const missed = [];
+        await Promise.all(queue.map(async function (url) {
           try {
             await cache.add(new Request(url, { cache: 'reload' }));
           } catch (err) {
- console.warn('[sw] precache miss: ' + url + ' (' + (err && err.message ? err.message : err) + ')');
+            console.warn('[sw] precache miss (pass ' + pass + '): ' + url +
+              ' (' + (err && err.message ? err.message : err) + ')');
+            missed.push(url);
           }
         }));
-        console.log('[sw] precache pass complete for ' + CACHE);
+        queue = missed;
       }
+      console.log('[sw] precache complete for ' + CACHE +
+        (queue.length ? ' with ' + queue.length + ' hole(s): ' + queue.join(', ') : ''));
       await self.skipWaiting();
     })()
   );
@@ -103,12 +121,19 @@ self.addEventListener('install', function (event) {
 self.addEventListener('activate', function (event) {
   event.waitUntil(
     (async function () {
-      const keys = await caches.keys();
-      await Promise.all(
-        keys
-          .filter(function (key) { return key !== CACHE && key !== SHARED_CACHE; })
-          .map(function (key) { return caches.delete(key); })
-      );
+      if (ASSET_URLS.length > 0) {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys
+            .filter(function (key) { return key !== CACHE && key !== SHARED_CACHE; })
+            .map(function (key) { return caches.delete(key); })
+        );
+      } else {
+        // Manifest-less activation (first install with a broken
+        // sw-manifest.js fetch): never delete the versioned caches — they are
+        // the only complete copy of the engine this origin has.
+        console.warn('[sw] activate without a manifest — leaving existing caches untouched');
+      }
       await self.clients.claim();
     })()
   );
