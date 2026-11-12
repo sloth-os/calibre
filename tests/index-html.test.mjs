@@ -44,6 +44,23 @@ check('dropzone element exists', /id="dropzone"/.test(html));
 check('file input exists (multiple, hidden)', /id="file-input"[^>]*multiple[^>]*hidden/.test(html) ||
   /<input type="file" id="file-input"/.test(html));
 check('format select exists', /id="format-select"/.test(html));
+check('output profile select exists (hidden until the engine reports profiles)',
+  /<select id="profile-select"[^>]*hidden/.test(html));
+check('profile select has an accessible label',
+  /<label for="profile-select"/.test(html) && /aria-label="Output profile"/.test(html));
+// Persistent profile description (the calibre GUI's always-visible
+// profile_description label). option[title] alone is hover-only — invisible
+// to touch pickers and screen readers — so the select must point at a real
+// element via aria-describedby, and that element must exist.
+check('profile select references a persistent description element (aria-describedby)',
+  /<select id="profile-select"[^>]*aria-describedby="profile-note"/.test(html) &&
+  /id="profile-note"/.test(html));
+// A select's intrinsic width follows its longest option (~337px for the 40
+// profiles); without a clamp it overflows the card at <=360px viewports. The
+// global select rule must constrain it.
+check('select is width-clamped (no card overflow from long profile labels)',
+  /select\s*\{[^}]*max-width:\s*100%/s.test(html) &&
+  /select\s*\{[^}]*min-width:\s*0/s.test(html));
 check('convert button exists', /id="convert-btn"/.test(html));
 check('console/log element exists', /id="console"/.test(html));
 check('downloads element exists', /id="downloads"/.test(html));

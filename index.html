@@ -227,7 +227,14 @@
       border: 1px solid var(--border);
       background: var(--card);
       color: var(--fg);
+      /* A select's intrinsic width follows its longest option ('PocketBook
+         PocketBook HD Touch (1-3)' among the 40 profiles computes ~337px) and
+         as a flex item with min-width:auto it refuses to shrink below that —
+         at <=360px viewports it spilled out of the card. Clamp it. */
+      max-width: 100%;
+      min-width: 0;
     }
+    select:disabled { opacity: 0.5; cursor: not-allowed; }
     #convert-btn { flex: none; }
     .fmt-note { width: 100%; color: var(--muted); font-size: 0.8rem; }
 
@@ -345,9 +352,16 @@
         <div class="convert-row">
           <label for="format-select" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Output format</label>
           <select id="format-select" aria-label="Output format"></select>
+          <label for="profile-select" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Output profile</label>
+          <select id="profile-select" aria-describedby="profile-note" aria-label="Output profile" hidden></select>
           <button id="convert-btn" class="primary" type="button">Convert</button>
           <button id="clear-btn" type="button">Clear</button>
           <span class="fmt-note" id="fmt-note"></span>
+          <!-- Persistent description of the SELECTED output profile — mirrors
+               calibre GUI's always-visible profile_description label. option
+               titles are hover-only and never reach touch pickers or screen
+               readers; aria-describedby on the select points here. -->
+          <span class="fmt-note" id="profile-note" hidden></span>
         </div>
       </div>
 

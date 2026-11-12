@@ -31,11 +31,13 @@
   // ----------------------------------------------------------------- state --
   var worker = null;
  var workerReady = false;
+  var formatsLoaded = false;
   var initId = 0;
   var nextId = 1;
   var pending = new Map(); // id -> {resolve, reject, onProgress}
   var book = null;         // {name, size, data: ArrayBuffer, metadata?}
   var availableFormats = { input: [], output: [] };
+  var availableProfiles = [];
   var objectUrls = []; // kept alive until Clear
   var deferredInstallPrompt = null;
 
@@ -48,6 +50,9 @@
   var bookDetails = $('book-details');
   var mdAuthors = $('md-authors'), mdLanguage = $('md-language'), mdSeries = $('md-series');
   var formatSelect = $('format-select'), convertBtn = $('convert-btn'), clearBtn = $('clear-btn');
+  var profileSelect = $('profile-select');
+  var profileNote = $('profile-note');
+  var profileDescs = {}; // short_name -> GUI-style description string
   var fmtNote = $('fmt-note');
  var consoleEl = $('console'), downloadsEl = $('downloads'), statusEl = $('status');
   var netStatus = $('net-status'), buildVersion = $('build-version'), installBtn = $('install-btn');
@@ -81,6 +86,21 @@
   }
 
   // ------------------------------------------------------------ the worker --
+  // Reveal the converter only once BOTH the engine is ready AND the formats/
+  // profiles request has been answered. Revealing at 'ready' alone showed a
+  // one-select row, then the profile select un-hid a moment later and the
+  // flex row reflowed ~100px taller, moving the Convert button out from under
+  // the user's finger (worst for a returning PWA user with a cached bundle,
+  // where formats land almost instantly but still after the reveal). A failed
+  // formats request also counts as answered: the converter shows with an
+  // empty dropdown and the error stays visible in the status line, rather
+  // than stranding the user on the boot screen forever.
+  function maybeRevealConverter() {
+    if (!workerReady || !formatsLoaded) return;
+    boot.hidden = true;
+    converter.hidden = false;
+  }
+
   function bootWorker() {
     // Module worker: pyodide rejects classic workers ('Classic web workers
     // are not supported'); worker.js imports pyodide.mjs dynamically.
@@ -100,8 +120,7 @@
         bootProgress.value = msg.pct || 0;
         if (msg.stage === 'ready') {
           workerReady = true;
-          boot.hidden = true;
-          converter.hidden = false;
+          maybeRevealConverter();
         }
         return;
       }
@@ -182,7 +201,14 @@
         }
         setStatus('Loaded ' + humanSize(book.size) + '. Pick a format and Convert.' + extraNote,
           extras.length ? undefined : 'ok');
-        convertBtn.disabled = false;
+        // Only re-enable Convert when no job is in flight. An intake (drop /
+        // share / paste) can land while a conversion is running — the dropzone
+        // is never disabled — and unconditionally enabling the button here
+        // would leave Convert clickable next to the selects setBusy() froze,
+        // and let a second doConvert() stack onto the worker queue. The
+        // in-flight job's own settle path calls setBusy(false), which re-arms
+        // every control once the queue drains.
+        if (!converting) convertBtn.disabled = false;
         askMetadata();
       }).catch(function (err) {
         setStatus('Could not read the file: ' + err.message, 'err');
@@ -228,36 +254,68 @@
   var converting = false;
   var pendingReload = false;
 
+  // Single switch for "a conversion is in flight": Convert/Clear buttons AND
+  // both selects. doConvert captures format/profile into the payload up
+  // front, so a mid-flight select change would be silently ignored while
+  // the visible control state diverges from the running job — disable them
+  // together instead. Disabling profileSelect while it is hidden (engine
+  // without profiles) is harmless.
+  function setBusy(on) {
+    convertBtn.disabled = on;
+    clearBtn.disabled = on;
+    formatSelect.disabled = on;
+    if (profileSelect) profileSelect.disabled = on; // skew-guarded, see above
+  }
+
   function doConvert() {
+    // Root-cause guard against stacked jobs: `converting` is the single source
+    // of truth for "a job is in flight". Without this, a second Convert click
+    // (or an intake that re-enabled the button) would push another job onto the
+    // worker's inbox; the FIRST job's settle would then clear `converting` and
+    // setBusy(false) while the second is still running — re-enabling Clear and
+    // both selects mid-flight and, worse, un-deferring the service-worker
+    // controllerchange reload (registerServiceWorker only defers while
+    // `converting`), which would destroy the in-memory book and the download
+    // row. Rejecting here keeps exactly one job alive at a time.
+    if (converting) return;
     if (!book || !book.data) return;
     var fmt = formatSelect.value;
     if (!fmt) return;
-    convertBtn.disabled = true;
-    clearBtn.disabled = true;
+    // Only send non-default profiles: 'default' is the engine's recommended
+    // value anyway, and omitting it keeps the no-options path byte-identical
+    // to before the profile chooser existed.
+    var profile = (profileSelect && !profileSelect.hidden) ? profileSelect.value : '';
+    var payload = {
+      name: book.name,
+      input: book.data,
+      outputFormat: fmt,
+    };
+    if (profile && profile !== 'default') {
+      payload.options = { output_profile: profile };
+    }
+    setBusy(true);
     converting = true;
     setStatus('Converting to ' + fmt.toUpperCase() + '…');
-    logLine('— converting ' + book.name + ' → ' + fmt.toUpperCase());
+    logLine('— converting ' + book.name + ' → ' + fmt.toUpperCase() +
+      (profile && profile !== 'default' ? ' (' + profile + ' profile)' : ''));
     var t0 = performance.now();
-    send('convert', {
-      name: book.name,
- input: book.data,
-      outputFormat: fmt,
-    }).then(function (msg) {
+    send('convert', payload).then(function (msg) {
       var dt = (performance.now() - t0) / 1000;
       converting = false;
-      convertBtn.disabled = false;
-      clearBtn.disabled = false;
+      setBusy(false);
       addDownload(msg.name, msg.data, msg.size);
       setStatus('Converted to ' + fmt.toUpperCase() + ' in ' + dt.toFixed(1) + 's.', 'ok');
-      logLine('— done in ' + dt.toFixed(1) + 's (' + humanSize(msg.size) + ')');
+      logLine('— done in ' + dt.toFixed(1) + 's (' + humanSize(msg.size) + ')' +
+        // Echo what the engine RESOLVED: an invalid profile silently falls
+        // back to 'default' inside calibre, and the echo makes that visible.
+        (msg.profile ? ' — output profile: ' + msg.profile : ''));
       // Deliberately NO reload on success even if pendingReload: reloading
       // now would destroy the download row the user just waited for. This
       // worker produced a good file — the update lands on the next natural
       // reload instead.
     }).catch(function (err) {
       converting = false;
-      convertBtn.disabled = false;
-      clearBtn.disabled = false;
+      setBusy(false);
       setStatus('Conversion failed: ' + err.message, 'err');
       logLine('— failed: ' + err.message);
       // Failed with a deferred SW update pending: take the reload now —
@@ -323,10 +381,76 @@
   function loadFormats() {
     send('formats', {}).then(function (msg) {
       availableFormats = { input: msg.input || [], output: msg.output || [] };
+      availableProfiles = msg.profiles || [];
       renderFormatOptions();
+      renderProfileOptions();
     }).catch(function (err) {
       setStatus('Could not list formats: ' + err.message, 'err');
+    }).then(function () {
+      // Settled either way — unblock the converter reveal (see
+      // maybeRevealConverter). The error, if any, is already on the status
+      // line; hiding the whole UI would be worse than showing it without
+      // format options.
+      formatsLoaded = true;
+      maybeRevealConverter();
     });
+  }
+
+  // -------------------------------------------------------------- profiles --
+  // calibre's output profiles (Kindle, iPad, Kobo, …) optimize the output for
+  // a device: image rescaling, font sizes, MOBI indexing. The engine reports
+  // them in formats-result.profiles (registry order, 'default' first); the
+  // GUI-style labels use profile.name ('Default profile' for the default, per
+  // page_setup.py) with description + screen size as the tooltip ('unlimited'
+  // when the sentinel 10000 appears, e.g. Tablet).
+  function renderProfileOptions() {
+    if (!profileSelect) return; // version-skew: old index.html without the select
+    if (!availableProfiles.length) {
+      // Older engine without profile support: leave the select hidden so the
+      // UI still works (default profile behavior).
+      profileSelect.hidden = true;
+      if (profileNote) { profileNote.textContent = ''; profileNote.hidden = true; }
+      return;
+    }
+    profileDescs = {};
+    var prev = profileSelect.value;
+    profileSelect.textContent = '';
+    availableProfiles.forEach(function (p) {
+      var opt = document.createElement('option');
+      opt.value = p.short_name;
+      opt.textContent = /^Default /.test(p.name || '') ? 'Default profile' : (p.name || p.short_name);
+      var w = p.screen && p.screen[0], h = p.screen && p.screen[1];
+      // calibre-faithful 'unlimited' rule: page_setup.py tests WIDTH only
+      // (w >= 10000). Both real sentinels are (10000, 10000) so it matches
+      // the GUI today; width-only stays correct if a future profile used a
+      // width sentinel with a normal height.
+      var ss = (w >= 10000) ? 'unlimited'
+        : ((w || '?') + ' × ' + (h || '?') + ' px');
+      // One source of truth: the tooltip AND the persistent #profile-note
+      // (aria-describedby) show this. Hover tips never reach touch pickers
+      // or screen readers; the GUI keeps the same text always-visible
+      // (page_setup.py show_desc -> profile_description label).
+      var desc = (p.description || '') + ' [Screen size: ' + ss + ']';
+      opt.title = desc;
+      profileDescs[p.short_name] = desc;
+      profileSelect.appendChild(opt);
+    });
+    // Restore a previous selection if it still exists (e.g. re-render after
+    // an engine restart), else default to 'default'.
+    if (prev && availableProfiles.some(function (p) { return p.short_name === prev; })) {
+      profileSelect.value = prev;
+    } else {
+      profileSelect.value = 'default';
+    }
+    renderProfileNote();
+    profileSelect.hidden = false;
+  }
+
+  function renderProfileNote() {
+    if (!profileNote) return;
+    var desc = profileDescs[profileSelect.value] || '';
+    profileNote.textContent = desc;
+    profileNote.hidden = !desc;
   }
 
   function renderFormatOptions() {
@@ -511,6 +635,14 @@
     });
     convertBtn.addEventListener('click', doConvert);
     clearBtn.addEventListener('click', clearAll);
+    // Keep the persistent profile description in sync with the selection
+    // (registered once here, not in renderProfileOptions, which re-runs).
+    // Guarded like every other profileSelect/profileNote use: in the
+    // version-skew window (new app.js against a cached old index.html with
+    // no #profile-select) an unguarded call would throw HERE — before
+    // bootWorker()/loadFormats() at the init tail ever run — stranding the
+    // user on the boot screen with no visible error.
+    if (profileSelect) profileSelect.addEventListener('change', renderProfileNote);
   }
 
   function setupNetListeners() {

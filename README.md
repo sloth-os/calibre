@@ -39,6 +39,19 @@ native code that cannot run in a browser:
 Everything else — EPUB, MOBI, AZW3, KEPUB, DOCX, HTMLZ, TXT, TXTZ, FB2, ODT, RTF,
 PDB, PML, RB, SNB, TCR, OEB, ZIP/CBZ in — works, including generated covers.
 
+### Output profiles
+
+Besides the output format, the converter exposes calibre's **output profile**
+chooser (the same "Page setup" dropdown as the desktop app): Default, Kindle and
+every Kindle variant (PaperWhite, Voyage, Oasis, Scribe, Fire, DX), iPad, Kobo,
+Nook, Sony Reader, PocketBook, generic e-ink, Tablet, and more. The profile tells
+the engine how to optimize the output for a device — image rescaling to the
+device screen, font-size mapping, and MOBI indexing. The list is enumerated at
+runtime from calibre's own plugin registry (never hardcoded), so it always
+matches the shipped engine; the chosen profile is echoed back after conversion
+so an unsupported choice (which calibre silently falls back to Default) is
+visible in the log.
+
 ## PWA / offline
 
 - `manifest.webmanifest` names the app, icons, `standalone` display, and registers

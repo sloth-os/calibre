@@ -9,8 +9,9 @@
  *                   | {id, type:'metadata', name, input: ArrayBuffer}
  *                   | {type:'evict'}
  *   worker -> main: {id, type:'ready'} | {id, type:'boot-progress', stage, pct}
- *                   | {id, type:'convert-result', name, data: ArrayBuffer, size, log: [...]}
- *                   | {id, type:'formats-result', input: [...], output: [...]}
+ *                   | {id, type:'convert-result', name, data: ArrayBuffer, size, log: [...], profile}
+ *                   | {id, type:'formats-result', input: [...], output: [...], version,
+ *                      profiles: [{short_name, name, description, screen}]}
  *                   | {id, type:'metadata-result', metadata: {...}}
  *                   | {id, type:'error', message, log?: [...]}
  *                   | {id, type:'progress', line} (calibre log lines)
@@ -194,38 +195,96 @@ WASM_UNSUPPORTED_OUTPUT = frozenset({
 def list_formats():
     ins = sorted(f for f in SUPPORTED_INPUT if f not in WASM_UNSUPPORTED_INPUT)
     outs = sorted(f for f in SUPPORTED_OUTPUT if f not in WASM_UNSUPPORTED_OUTPUT)
-    return json.dumps({'input': ins, 'output': outs, 'version': CALIBRE_VERSION})
+    # Output profiles straight from calibre's plugin registry — the same
+    # source the GUI's Page Setup dropdown uses. Enumerated at runtime,
+    # never hardcoded in the UI, so the list always matches the shipped
+    # engine. The registry iteration order puts 'default' wherever the
+    # plugin list happens to have it, so move it to the front explicitly
+    # (the GUI likewise preselects it regardless of position); the rest
+    # keeps registry order.
+    from calibre.customize.ui import output_profiles
+    prof_list = [{
+        'short_name': p.short_name,
+        'name': str(p.name),
+        'description': str(p.description),
+        'screen': [p.width, p.height],
+    } for p in output_profiles()]
+    profiles = ([p for p in prof_list if p['short_name'] == 'default'] +
+                [p for p in prof_list if p['short_name'] != 'default'])
+    return json.dumps({'input': ins, 'output': outs, 'version': CALIBRE_VERSION,
+                       'profiles': profiles})
 
 _seq = 0
-def convert_file(name, data, output_format, options=None):
-    """Convert bytes -> (output_name, output_bytes, log_lines)."""
+def convert_file(name, data, output_format, options_json=None):
+    """Convert bytes -> (output_name, output_bytes, log_lines).
+
+    options_json is a JSON object string (double-encoded by runConvert so JS
+    literals never reach Python source) mapping option name -> value, e.g.
+    {"output_profile": "kindle"}.
+    """
     global _seq
     _seq += 1
     jid = _seq
     indir = f'{WORK}/in{jid}'
-    os.makedirs(indir, exist_ok=True)
-    inpath = os.path.join(indir, name)
     outname = os.path.splitext(name)[0] + '.' + output_format
-    outpath = os.path.join(indir, outname)
-    with open(inpath, 'wb') as f:
-        f.write(data)
 
-    from calibre.utils.logging import Log
+    # Give the Log a real capture sink IN ADDITION to the default ANSIStream
+    # (which stays outputs[0], so every WARN+ line still reaches stdout ->
+    # pyodide's progress callback -> the page console; gates scan stdout for
+    # cover failures and profile fallbacks). FileStream into a StringIO is
+    # calibre's own plain-text stream class — the captured lines travel back
+    # in convert-result.log / error.log, which used to be a dead field
+    # (always []). This is how engine diagnostics like "Profile (output)
+    # 'foo' is no longer available, using default" or a swallowed
+    # log.exception() reach the caller instead of dying on stdout.
+    import io as _io
+    from calibre.utils.logging import Log, FileStream
     log = Log(level=Log.WARN)
-    lines = []
-    orig_print = print
+    _sink = _io.StringIO()
+    log.outputs.append(FileStream(_sink))
+    def _log_lines():
+        return _sink.getvalue().splitlines()
+    # EVERYTHING fallible (input write, options parse, conversion) lives
+    # inside this try: the finally's rmtree is the only cleanup, and the
+    # worker process is long-lived — a json.loads/IO failure before the try
+    # would leak /work/inN in MEMFS forever on every bad request.
     try:
+        os.makedirs(indir, exist_ok=True)
+        inpath = os.path.join(indir, name)
+        outpath = os.path.join(indir, outname)
+        with open(inpath, 'wb') as f:
+            f.write(data)
+        options = json.loads(options_json) if options_json else None
         plumber = Plumber(inpath, outpath, log=log)
         if options:
-            for k, v in options.items():
-                setattr(plumber.options, k, v)
+            # The CLI's own mechanism (cli.py: merge_ui_recommendations with
+            # level HIGH before run()). Setting attributes on the plumber
+            # before run() CANNOT work: run() -> setup_options() rebuilds
+            # self.opts from scratch, and Plumber has no "options"
+            # attribute at all (the old setattr loop here was dead code that
+            # would have raised AttributeError the first time anything sent
+            # options). HIGH overrides every option except ones the plugins
+            # pinned at HIGH; unknown names are silently skipped. The
+            # OptionRecommendation objects are per-Plumber-instance (cloned
+            # in __init__), so sequential conversions in this long-lived
+            # process don't leak a previous book's options into the next.
+            from calibre.customize.conversion import OptionRecommendation
+            plumber.merge_ui_recommendations(
+                [(k, v, OptionRecommendation.HIGH) for k, v in options.items()])
         plumber.run()
         with open(outpath, 'rb') as f:
             out = f.read()
-        return json.dumps({'ok': True, 'name': outname, 'data': out.hex(), 'log': lines})
+        # Echo the RESOLVED output profile (setup_options() maps the
+        # short_name string to the profile class; an invalid name falls back
+        # to 'default' with a warn on stdout). The UI/tests can confirm the
+        # choice actually took effect instead of trusting the request.
+        return json.dumps({'ok': True, 'name': outname, 'data': out.hex(),
+                           'log': _log_lines(),
+                           'profile': getattr(plumber.opts.output_profile, 'short_name', None)})
     except Exception as e:
         tb = traceback.format_exc()
-        return json.dumps({'ok': False, 'error': f'{type(e).__name__}: {e}', 'traceback': tb})
+        return json.dumps({'ok': False, 'error': f'{type(e).__name__}: {e}',
+                           'traceback': tb, 'log': _log_lines()})
     finally:
         import shutil
         shutil.rmtree(indir, ignore_errors=True)
@@ -303,6 +362,7 @@ function dispatchBusy(msg) {
               input: fmts.input,
               output: fmts.output,
               version: fmts.version,
+              profiles: fmts.profiles,
             });
           });
         case 'convert':
@@ -334,9 +394,14 @@ function runConvert(msg) {
   for (var i = 0; i < bytes.length; i += CHUNK) {
     hex += bytesToHex(bytes.subarray(i, i + CHUNK));
   }
-  var optsJson = msg.options ? JSON.stringify(msg.options) : 'None';
+  // Double-encode: convert_file() takes a JSON *string* and json.loads() it,
+  // so option values never enter the generated Python source as literals
+  // (JS true/false/null are not Python literals, and a value with quotes
+  // would break the code string). The outer JSON.stringify produces a valid
+  // Python string literal for the JSON text.
+  var optsArg = msg.options ? JSON.stringify(JSON.stringify(msg.options)) : 'None';
   var code = 'convert_file(' + JSON.stringify(name) + ', bytes.fromhex(' + JSON.stringify(hex) + '), ' +
- JSON.stringify(fmt) + ', ' + optsJson + ')';
+    JSON.stringify(fmt) + ', ' + optsArg + ')';
   return pyodide.runPythonAsync(code).then(function (resultJson) {
     var res = JSON.parse(resultJson);
     if (!res.ok) {
@@ -351,6 +416,7 @@ function runConvert(msg) {
       data: outBytes.buffer,
       size: outBytes.length,
       log: res.log || [],
+      profile: res.profile || null,
     });
   });
 }

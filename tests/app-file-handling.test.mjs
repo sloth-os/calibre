@@ -101,5 +101,89 @@ check('app.js defers the controllerchange reload while converting',
 check('format dropdown built from engine-reported formats (renderFormatOptions)',
   /renderFormatOptions/.test(app) && /formatSelect\.appendChild/.test(app));
 
+// ---- output profile wiring ----
+// The profile list comes from the engine (formats-result.profiles), NOT a
+// hardcoded JS array — so the dropdown always matches the shipped calibre.
+check('profile dropdown built from engine-reported profiles (renderProfileOptions)',
+  /renderProfileOptions/.test(app) && /availableProfiles = msg\.profiles/.test(app) &&
+  /profileSelect\.appendChild/.test(app));
+// doConvert must send output_profile ONLY for non-default selections (the
+// no-options path stays byte-identical to the pre-profile protocol) and the
+// worker must merge options via the CLI mechanism, not dead setattr code.
+check('app.js sends options.output_profile only when non-default',
+  /profile !== 'default'/.test(app) && /output_profile: profile/.test(app));
+check('worker.js merges convert options via merge_ui_recommendations (CLI pattern)',
+  /merge_ui_recommendations/.test(worker) && /OptionRecommendation\.HIGH/.test(worker) &&
+  !/plumber\.options/.test(worker));
+// The semantic invariant is "msg.options never reaches the generated Python
+// source except wrapped in JSON.stringify" (raw JSON text spliced into code
+// makes JS true/false/null Python NameErrors) plus "python json.loads the
+// string it receives". Deliberately NOT pinned to the nested
+// JSON.stringify(JSON.stringify(...)) call shape — a temp-var refactor is
+// behavior-identical and must keep passing; the live weirdOpts conversion in
+// worker-integration (bool/null/quote/unicode values) is the dynamic backstop.
+check('worker.js never splices raw msg.options into python code (double-encode invariant)',
+  (() => {
+    // Every msg.options occurrence must either be WRAPPED by JSON.stringify
+    // (any nesting/temp-var shape) or be a bare truthiness test — never a
+    // value spliced into the generated python source.
+    const occ = worker.match(/.{0,25}msg\.options.{0,5}/g) || [];
+    return occ.length >= 1 && occ.every(s =>
+      /JSON\.stringify\(\s*msg\.options/.test(s) || /msg\.options\s*\?/.test(s));
+  })() &&
+  /json\.loads\(options_json\)/.test(worker));
+check('convert-result echoes the resolved profile back to the app',
+  /profile: res\.profile/.test(worker) && /msg\.profile/.test(app));
+// The selected profile's description must live in a persistent element, not
+// only option[title] (hover-only; native touch pickers and screen readers
+// never see it). Mirrors calibre GUI's always-visible profile_description.
+// Content correctness (text === selected option's title, follows changes) is
+// asserted dynamically in browser-smoke; the static gate pins only the
+// wiring: a named sync function registered on the select's change event.
+check('app.js keeps a persistent profile description in sync (#profile-note)',
+  /function renderProfileNote/.test(app) &&
+  /profileSelect\.addEventListener\('change', renderProfileNote\)/.test(app));
+// doConvert captures format/profile up front; the selects must be disabled
+// during a conversion so a mid-flight change cannot silently diverge from
+// the running job. The invariant: ALL busy toggling inside doConvert goes
+// through the single setBusy helper (buttons AND selects together) — no
+// direct .disabled writes that could forget a select. Not pinned to an exact
+// setBusy(false) COUNT: consolidating the two settle paths into a .finally()
+// is behavior-preserving and must keep passing.
+check('app.js disables both selects during conversion (single setBusy path in doConvert)',
+  /function setBusy\(on\)/.test(app) &&
+  /formatSelect\.disabled = on/.test(app) && /profileSelect\.disabled = on/.test(app) &&
+  (() => {
+    const body = app.slice(app.indexOf('function doConvert()'));
+    const doConvertSrc = body.slice(0, body.indexOf('\n  function addDownload'));
+    return /setBusy\(true\)/.test(doConvertSrc) && /setBusy\(false\)/.test(doConvertSrc) &&
+      !/(convertBtn|clearBtn|formatSelect|profileSelect)\.disabled\s*=/.test(doConvertSrc);
+  })());
+// One job at a time: doConvert must reject while `converting` (a stacked
+// second job's FIRST settle would clear `converting` + setBusy(false) while
+// it is still running — re-enabling Clear mid-flight and un-deferring the
+// service-worker controllerchange reload, destroying book.data and the
+// download row), and handleIncomingFiles' Convert re-enable must respect
+// `converting` too (an intake can land mid-conversion — the dropzone is
+// never disabled). Dynamic backstop: browser-smoke dispatches a second
+// synthetic click and asserts exactly one 'convert' message reaches the
+// worker.
+check('app.js enforces one conversion at a time (converting guards dispatch + intake)',
+  (() => {
+    const body = app.slice(app.indexOf('function doConvert()'));
+    const doConvertSrc = body.slice(0, body.indexOf('\n  function addDownload'));
+    return /if \(converting\) return;/.test(doConvertSrc) &&
+      /if \(!converting\) convertBtn\.disabled = false;/.test(app) &&
+      // no UNGUARDED intake re-enable anywhere (the pre-fix line shape)
+      !/^\s*convertBtn\.disabled = false;\s*$/m.test(app);
+  })());
+// Converter reveal waits for BOTH engine-ready and formats-settled, so the
+// profile select cannot un-hide after the card is already interactive and
+// reflow the Convert button ~100px downward.
+check('converter reveal gated on workerReady AND formatsLoaded (no late layout shift)',
+  /function maybeRevealConverter/.test(app) &&
+  /if \(!workerReady \|\| !formatsLoaded\) return;/.test(app) &&
+  /formatsLoaded = true;/.test(app));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { failures.forEach(f => console.log('FAILED: ' + f)); process.exit(1); }

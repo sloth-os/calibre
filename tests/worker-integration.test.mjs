@@ -355,6 +355,128 @@ try {
   check('no cover-generation failures logged (qt shim live in-engine)',
     coverFailures.length === 0, coverFailures.slice(0, 3).join(' | '));
 
+  // ---- output profiles (the chooser feature) -------------------------------
+  // profiles come from calibre's plugin registry via list_formats() — never
+  // hardcoded in JS. 'default' must be first (registry order) so the UI can
+  // preselect it.
+  check('formats: profiles reported (engine registry, not hardcoded)',
+    Array.isArray(fmts.profiles) && fmts.profiles.length > 30,
+    `got ${fmts.profiles && fmts.profiles.length}`);
+  const pDefault = (fmts.profiles || [])[0];
+  check('formats: first profile is "default"',
+    Boolean(pDefault && pDefault.short_name === 'default'),
+    JSON.stringify(pDefault));
+  const pKindle = (fmts.profiles || []).find(p => p.short_name === 'kindle');
+  check('formats: kindle profile present with name/description/screen',
+    Boolean(pKindle && pKindle.name === 'Kindle' &&
+      typeof pKindle.description === 'string' && pKindle.description.length > 0 &&
+      Array.isArray(pKindle.screen) && pKindle.screen.length === 2),
+    JSON.stringify(pKindle));
+  // Screen entries must be NUMBERS with calibre's real values (profiles.py:
+  // KindleOutput.screen_size = (525, 640)) — the UI's 'W × H px' /
+  // 'unlimited' formatting logic depends on numeric comparisons, and
+  // Array.isArray + length 2 alone would pass string entries too. The
+  // tablet profile carries the (10000, 10000) unlimited sentinel
+  // (profiles.py TabletOutput), which drives the width>=10000 rule.
+  const pTablet = (fmts.profiles || []).find(p => p.short_name === 'tablet');
+  check('formats: screen sizes are real numbers (kindle 525x640, tablet 10000 sentinel)',
+    Boolean(pKindle && pKindle.screen.every(Number.isFinite) &&
+      pKindle.screen[0] === 525 && pKindle.screen[1] === 640) &&
+    Boolean(pTablet && pTablet.screen[0] >= 10000),
+    JSON.stringify({ kindle: pKindle && pKindle.screen, tablet: pTablet && pTablet.screen }));
+  check('formats: every profile has short_name + name strings',
+    (fmts.profiles || []).every(p => typeof p.short_name === 'string' && p.short_name &&
+      typeof p.name === 'string' && p.name),
+    (fmts.profiles || []).filter(p => !p.short_name || !p.name).map(p => JSON.stringify(p)).join(' | '));
+
+  // The convert-result echoes the RESOLVED profile short_name read back from
+  // plumber.opts.output_profile AFTER run() — proof the option injection
+  // (merge_ui_recommendations, the CLI mechanism) actually took effect, not
+  // just that the request was accepted. An invalid name makes calibre fall
+  // back to 'default' with a warning.
+  const profMobi = await send('convert', {
+    name: 'test.txt',
+    input: exactUtf8(txt),
+    outputFormat: 'mobi',
+    options: { output_profile: 'kindle' },
+  });
+  check('convert with options.output_profile=kindle returns a result',
+    profMobi.type === 'convert-result', JSON.stringify(profMobi).slice(0, 120));
+  check('convert-result echoes resolved profile kindle',
+    profMobi.profile === 'kindle', String(profMobi.profile));
+  const profBytes = Buffer.from(profMobi.data);
+  check('profile MOBI: BOOKMOBI magic intact',
+    profBytes.subarray(60, 68).toString('ascii') === 'BOOKMOBI',
+    profBytes.subarray(60, 68).toString('hex'));
+
+  // No cross-conversion leakage: options are merged into per-Plumber-instance
+  // OptionRecommendation clones, so the NEXT conversion without options must
+  // resolve 'default', not inherit 'kindle' from the long-lived process.
+  const noProf = await send('convert', {
+    name: 'test.txt',
+    input: exactUtf8(txt),
+    outputFormat: 'epub',
+  });
+  check('conversion without options resolves the default profile (no leak)',
+    noProf.type === 'convert-result' && noProf.profile === 'default',
+    `type ${noProf.type}, profile ${noProf.profile}`);
+
+  // Invalid profile name: calibre's set_profile() warns and falls back —
+  // the conversion still succeeds and the echo shows 'default'.
+  const badProf = await send('convert', {
+    name: 'test.txt',
+    input: exactUtf8(txt),
+    outputFormat: 'epub',
+    options: { output_profile: 'no-such-device' },
+  });
+  check('invalid profile falls back to default (engine survives)',
+    badProf.type === 'convert-result' && badProf.profile === 'default',
+    `type ${badProf.type}, profile ${badProf.profile}`);
+  // The FileStream sink added in convert_file(): calibre's set_profile()
+  // warn must travel back IN the result's log array — not only on stdout.
+  // Proves convert-result.log is no longer the always-empty dead field.
+  check('invalid profile: calibre warning captured in result log array',
+    Array.isArray(badProf.log) && badProf.log.some(l => /no longer available/i.test(l)),
+    'log=' + JSON.stringify(Array.isArray(badProf.log) ? badProf.log.slice(0, 4) : badProf.log).slice(0, 200));
+
+  // Options with values that would break naive JS->Python literal embedding
+  // (booleans, null, quotes, unicode) must survive the double-JSON encoding.
+  const weirdOpts = await send('convert', {
+    name: 'test.txt',
+    input: exactUtf8(txt),
+    outputFormat: 'epub',
+    options: {
+      output_profile: 'tablet',
+      no_chapters_in_toc: true,
+      title: "Bob's «Book» — ünïcode",
+      comments: null,
+    },
+  });
+  check('options with bool/null/quote/unicode values convert cleanly',
+    weirdOpts.type === 'convert-result' && weirdOpts.profile === 'tablet',
+    JSON.stringify({ t: weirdOpts.type, p: weirdOpts.profile, e: weirdOpts.error }).slice(0, 160));
+  // ...and PROVE the non-profile option values actually took effect. The
+  // check above alone passes a mutant whose merge keeps only output_profile
+  // (verified experimentally): title/comments would be silently discarded
+  // with nothing observing them. Pipe the produced EPUB back through the
+  // metadata path: the title option must have overridden the input-derived
+  // one ("Bob's «Book» — ünïcode" — quotes, guillemets, em dash, diacritics
+  // surviving the double-JSON encoding AND calibre's OPF writer).
+  if (weirdOpts.type === 'convert-result' && weirdOpts.data) {
+    const mdBack = await send('metadata', { name: weirdOpts.name, input: weirdOpts.data });
+    check('option values take effect: title override survives roundtrip',
+      mdBack.metadata && mdBack.metadata.title === "Bob's «Book» — ünïcode",
+      JSON.stringify(mdBack.metadata).slice(0, 200));
+    check('option values take effect: null comments handled (no crash, empty/absent)',
+      mdBack.metadata && (mdBack.metadata.comments === '' || mdBack.metadata.comments == null),
+      JSON.stringify(mdBack.metadata && mdBack.metadata.comments).slice(0, 120));
+  } else {
+    check('option values take effect: title override survives roundtrip', false,
+      'conversion did not return data: ' + weirdOpts.type);
+    check('option values take effect: null comments handled (no crash, empty/absent)', false,
+      'conversion did not return data: ' + weirdOpts.type);
+  }
+
   // Garbage input -> clean engine-level error (or a tolerated conversion),
   // never a hang or a worker crash. send() rejects precisely on the worker's
   // {type:'error'} message; a hang would surface as the run-level timeout
